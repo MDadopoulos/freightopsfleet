@@ -15,7 +15,8 @@ card declares — the card is the allowlist, enforced here at build time.
 VERIFIED against google-adk 2.7.1 (BUILD-PLAN step 1, 2026-08-19). All three
 contracts this file assumed hold; nothing here needed adapting. Re-run
 `python scripts/adk_spike.py` after any ADK upgrade — `tests/test_adk_contract.py`
-seals the same checks so an upgrade goes red in CI rather than in the ledger.
+seals the same checks under pytest, so an upgrade goes red there, not in the
+ledger.
 
   1. A dict from `before_tool_callback` short-circuits the tool body. HOLDS.
      `flows/llm_flows/functions.py` assigns the callback's return to

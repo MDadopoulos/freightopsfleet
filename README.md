@@ -93,9 +93,9 @@ witness is the tool body's own side effect, not the framework's word for it:
 python scripts/adk_spike.py     # no credentials needed
 ```
 
-Verified on google-adk 2.7.1. `tests/test_adk_contract.py` runs the same probes,
-so an ADK upgrade that broke the contract would go red in CI rather than quietly
-letting held actions execute.
+Verified on google-adk 2.7.1. `tests/test_adk_contract.py` runs the same probes
+under `pytest`, so an ADK upgrade that broke the contract goes red in the test
+suite rather than quietly letting held actions execute.
 
 ---
 
