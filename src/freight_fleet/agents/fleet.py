@@ -12,15 +12,36 @@ coordinator keeps the thread and can run two desks on one shipment without
 handing the conversation away. Each specialist gets ONLY the tools its catalog
 card declares — the card is the allowlist, enforced here at build time.
 
-!! VERIFY BEFORE BUILDING !!
-The ADK import paths and constructor kwargs below match google-adk 1.x as
-documented at the time of writing. Pin your version, run `adk --version`, and
-check these three contracts first — everything else in the repo is framework-
-independent, but the whole fleet hangs off them:
-  1. `before_tool_callback` returning a dict short-circuits the tool body.
-  2. `AgentTool(agent=...)` wraps an LlmAgent as a callable tool.
-  3. Callback signature is `(tool, args, tool_context)`.
-If any differs, adapt HERE. Do not weaken the gate to fit the framework.
+VERIFIED against google-adk 2.7.1 (BUILD-PLAN step 1, 2026-08-19). All three
+contracts this file assumed hold; nothing here needed adapting. Re-run
+`python scripts/adk_spike.py` after any ADK upgrade — `tests/test_adk_contract.py`
+seals the same checks so an upgrade goes red in CI rather than in the ledger.
+
+  1. A dict from `before_tool_callback` short-circuits the tool body. HOLDS.
+     `flows/llm_flows/functions.py` assigns the callback's return to
+     `function_response` and calls the tool only `if function_response is None`
+     — in both the async and the live dispatch paths.
+  2. `AgentTool(agent=...)` wraps an LlmAgent as a callable tool. HOLDS.
+  3. Callback signature `(tool, args, tool_context)`. HOLDS — but ADK invokes it
+     BY KEYWORD, so the parameter NAMES in `make_before_tool_gate` are part of
+     the contract, not decoration. Renaming one breaks the gate at runtime.
+
+Two sharp edges found in that dispatch loop, neither triggered by today's code:
+  - The short-circuit tests `is None`, not truthiness, so a falsy-but-not-None
+    return ({} , "") also skips the body — it just doesn't stop the callback
+    chain.
+  - With a LIST of before_tool_callbacks, each result overwrites the last
+    unconditionally, so a later callback returning None ERASES an earlier
+    falsy hold and the tool runs. Attach exactly one callback here. If that
+    ever changes, this is where the gate springs a leak.
+
+ADK 2.x's AgentTool docstring now nudges toward `sub_agents=[...]` with
+`mode='single_turn'` instead. That is inline execution, not the transfer
+BUILD-PLAN §5 ruled out, so it is a live option for step 5 — but it is a step-5
+decision, not a step-1 one, and AgentTool works today.
+
+If a future version differs, adapt HERE. Do not weaken the gate to fit the
+framework.
 """
 
 from __future__ import annotations
