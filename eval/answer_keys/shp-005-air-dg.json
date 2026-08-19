@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "shipment_id": "shp-005-air-dg",
+  "mode": "air",
+  "booking_ref": "MFS-BK-260708-152",
+  "bl_no": "MFSA-26-08812",
+  "docs": {"air_waybill": "air_waybill.md", "packing_list": "packing_list.csv", "commercial_invoice": "commercial_invoice.md"},
+  "missing_docs": [],
+  "facts": {
+    "pol": "PVG", "pod": "FRA", "etd": "2026-07-14", "eta": "2026-07-15",
+    "transit_days_window": [1, 3],
+    "containers": [],
+    "awb": {"number": "999-44718203", "valid": true},
+    "seals": [],
+    "true_gross_kg": 2064.0, "true_net_kg": 1824.0,
+    "incoterm": "CPT Frankfurt", "currency": "USD"
+  },
+  "min_findings": 2, "max_findings": null,
+  "findings": [
+    {"id": "D13", "category": "undeclared_dangerous_goods", "severity": "critical", "field": "goods_description",
+     "evidence": [{"doc": "air_waybill", "value": "CONSUMER ELECTRONIC ACCESSORIES"}, {"doc": "commercial_invoice", "value": "lithium-ion battery pack"}, {"doc": "commercial_invoice", "value": "8507.60"}],
+     "required_patterns": ["(?i)lithium", "(?i)accessories", "(?i)dangerous goods|\\bDG\\b|UN\\s?3480|declar"],
+     "summary": "The air waybill describes the cargo as CONSUMER ELECTRONIC ACCESSORIES; the invoice sells lithium-ion battery packs under HS 8507.60. No dangerous-goods declaration accompanies the shipment."},
+    {"id": "D11", "category": "date_impossibility", "severity": "medium", "field": "execution_date",
+     "evidence": [{"doc": "air_waybill", "value": "2026-07-16"}, {"doc": "air_waybill", "value": "2026-07-14"}],
+     "required_patterns": ["2026-07-16", "2026-07-14"],
+     "summary": "The air waybill is executed on 2026-07-16, two days after the flight it covers departed on 2026-07-14."}
+  ]
+}

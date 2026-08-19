@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "shipment_id": "shp-001-pristine",
+  "mode": "ocean_fcl",
+  "booking_ref": "MFS-BK-260609-088",
+  "bl_no": "MFSB-26071761",
+  "docs": {"waybill": "waybill.md", "packing_list": "packing_list.csv", "commercial_invoice": "commercial_invoice.md"},
+  "missing_docs": [],
+  "facts": {
+    "pol": "CNNGB", "pod": "USLAX", "etd": "2026-07-02", "eta": "2026-07-17",
+    "transit_days_window": [12, 18],
+    "containers": [{"number": "MERU3180074", "valid": true, "type": "45G1"}],
+    "seals": ["MLSE099231"],
+    "true_gross_kg": 18545.6, "true_net_kg": 16424.0,
+    "incoterm": "FOB Ningbo", "currency": "USD"
+  },
+  "min_findings": 0, "max_findings": 0,
+  "findings": []
+}

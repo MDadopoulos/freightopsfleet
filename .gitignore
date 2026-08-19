@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+.env
+workspace/
+audit/
+eval/runs/*.json
+!eval/runs/.gitkeep
+
+.pytest_cache/
+.ruff_cache/
+.DS_Store

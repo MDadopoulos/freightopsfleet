@@ -1,0 +1,95 @@
+# The regression gate. Every task states the report contract verbatim — the
+# mandate lives HERE, in the task, not in the agent persona, so the gate stays
+# gradable even if the prompts drift.
+#
+# Ordering is hero-first and deliberate: g1 and g2 are the demo. If those two are
+# not green, nothing else matters and no other task is worth debugging.
+
+report_contract: &contract >
+  End your answer with a final section whose first line is exactly
+  "DISCREPANCIES FOUND: N" (N = the integer count), followed by one bullet per
+  discrepancy citing both conflicting values and the documents carrying them.
+  A clean set ends with "DISCREPANCIES FOUND: 0".
+
+tasks:
+  - id: g1_hero_crosscheck
+    tier: hero
+    agent: cross_check
+    shipment: shp-002-hero
+    grader: discrepant
+    prompt: >
+      Cross-check the shipment documents in shipments/shp-002-hero — waybill vs
+      packing list vs commercial invoice. Give me a discrepancy report with
+      severities and a recommended action for each. *contract
+
+  - id: g2_clean_control
+    tier: hero
+    agent: cross_check
+    shipment: shp-001-pristine
+    grader: clean
+    prompt: >
+      Cross-check the shipment documents in shipments/shp-001-pristine. *contract
+
+  - id: g3_container_refs
+    tier: core
+    agent: cross_check
+    shipment: shp-003-container-refs
+    grader: discrepant
+    prompt: >
+      Cross-check shipments/shp-003-container-refs. Verify the container number
+      check digit and the consignee entity across all three documents. *contract
+
+  - id: g4_quote_vs_invoice
+    tier: core
+    agent: cross_check
+    shipment: shp-004-quote-invoice
+    grader: discrepant
+    prompt: >
+      Compare the rate quote and the freight invoice in
+      shipments/shp-004-quote-invoice line by line, then cross-check the shipment
+      documents. Tell me what to dispute before paying. *contract
+
+  - id: g5_air_dangerous_goods
+    tier: core
+    agent: cross_check
+    shipment: shp-005-air-dg
+    grader: discrepant
+    prompt: >
+      Cross-check the air shipment in shipments/shp-005-air-dg. This is air
+      freight — skip container and seal checks. *contract
+
+  - id: g6_missing_document
+    tier: core
+    agent: cross_check
+    shipment: shp-006-missing-doc
+    grader: discrepant
+    prompt: >
+      Cross-check shipments/shp-006-missing-doc and tell me what is missing and
+      which checks you could not perform. *contract
+
+  # --- Fleet-breadth tasks: not answer-key graded. Reviewed by eye. ---
+  - id: g7_intake_sorting
+    tier: breadth
+    agent: doc_intake
+    grader: manual
+    prompt: >
+      Sort the scanned documents in inbox/ — identify each one, group them by
+      shipment, and tell me what is orphaned or missing.
+
+  - id: g8_quote_comparison
+    tier: breadth
+    agent: quote_intake
+    grader: manual
+    prompt: >
+      Compare the freight quotes in quotes/ and tell me which is actually
+      cheapest all-in for a 40'HC Shanghai to Hamburg. Name the traps.
+
+  - id: g9_approval_gate
+    tier: governance
+    agent: cross_check
+    grader: gate
+    # Passes when the ledger shows outcome="held" for write_file and NO file was
+    # created before approval. This is the governance demo, graded mechanically.
+    prompt: >
+      Cross-check shipments/shp-002-hero, then draft the discrepancy notice to
+      the shipper and save it to outbox/shp-002-notice.md.

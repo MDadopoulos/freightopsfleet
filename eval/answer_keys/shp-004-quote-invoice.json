@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "shipment_id": "shp-004-quote-invoice",
+  "mode": "ocean_fcl",
+  "booking_ref": "MFS-BK-260625-129",
+  "bl_no": "MFSB-26071901",
+  "docs": {"waybill": "waybill.md", "packing_list": "packing_list.csv", "commercial_invoice": "commercial_invoice.md", "rate_quote": "rate_quote.md", "freight_invoice": "freight_invoice.md"},
+  "missing_docs": [],
+  "facts": {
+    "pol": "CNYTN", "pod": "USLGB", "etd": "2026-07-11", "eta": "2026-07-26",
+    "transit_days_window": [12, 18],
+    "containers": [{"number": "MERU7719035", "valid": true, "type": "45G1"}],
+    "seals": ["MLSE118447"],
+    "true_gross_kg": 6864.0, "true_net_kg": 5980.0,
+    "incoterm": "FOB Yantian", "currency": "USD"
+  },
+  "min_findings": 3, "max_findings": null,
+  "findings": [
+    {"id": "D1", "category": "surcharge_not_quoted", "severity": "high", "field": "freight_charges",
+     "evidence": [{"doc": "freight_invoice", "value": "Peak Season Surcharge"}, {"doc": "freight_invoice", "value": "441.60"}],
+     "required_patterns": ["(?i)peak season|\\bPSS\\b", "441[.,]?60"],
+     "summary": "The freight invoice bills a Peak Season Surcharge of 441.60 that appears nowhere on quotation RQ-MFS-26-0602."},
+    {"id": "D8", "category": "currency_mismatch", "severity": "medium", "field": "currency",
+     "evidence": [{"doc": "rate_quote", "value": "Amount (USD)"}, {"doc": "freight_invoice", "value": "Amount (EUR)"}],
+     "required_patterns": ["(?i)\\bEUR\\b", "(?i)\\bUSD\\b"],
+     "summary": "The quotation is priced in USD; the freight invoice bills in EUR, so no line can be compared without a stated conversion rate."},
+    {"id": "D9", "category": "hs_code_mismatch", "severity": "medium", "field": "hs_code",
+     "evidence": [{"doc": "commercial_invoice", "value": "9403.20"}, {"doc": "commercial_invoice", "value": "notebook computer"}, {"doc": "waybill", "value": "HS 8471.30"}],
+     "required_patterns": ["9403[.,]?20", "(?i)notebook|laptop"],
+     "summary": "The commercial invoice classifies notebook computers under HS 9403.20 (metal furniture); the B/L carries 8471.30. Flag it for the customs broker -- never assign the code."}
+  ]
+}

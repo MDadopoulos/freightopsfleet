@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "shipment_id": "shp-003-container-refs",
+  "mode": "ocean_fcl",
+  "booking_ref": "MFS-BK-260602-071",
+  "bl_no": "MFSB-26071633",
+  "docs": {"waybill": "waybill.md", "packing_list": "packing_list.csv", "commercial_invoice": "commercial_invoice.md"},
+  "missing_docs": [],
+  "facts": {
+    "pol": "CNYTN", "pod": "USNYC", "etd": "2026-06-20", "eta": "2026-07-22",
+    "transit_days_window": [28, 35],
+    "containers": [
+      {"number": "MERU4106195", "valid": true, "type": "45G1"},
+      {"number": "MERU4106915", "valid": false, "type": "45G1"}
+    ],
+    "seals": ["MLSE207114"],
+    "true_gross_kg": 18420.0, "true_net_kg": 15900.0,
+    "incoterm": "FOB Yantian", "currency": "USD"
+  },
+  "min_findings": 3, "max_findings": null,
+  "findings": [
+    {"id": "D3", "category": "container_check_digit", "severity": "high", "field": "container_number",
+     "evidence": [{"doc": "waybill", "value": "MERU4106915"}, {"doc": "packing_list", "value": "MERU4106195"}],
+     "required_patterns": ["MERU\\s?410\\s?69\\s?15|MERU4106915", "MERU\\s?410\\s?61\\s?95|MERU4106195"],
+     "summary": "The B/L prints container MERU4106915, whose ISO 6346 check digit does not compute (serial 410691 checks to 3, not 5); the packing list shows MERU4106195, which is valid."},
+    {"id": "D5", "category": "missing_seal", "severity": "medium", "field": "seal_number",
+     "evidence": [{"doc": "packing_list", "value": "MLSE207114"}],
+     "required_patterns": ["(?i)seal"],
+     "summary": "The FCL bill of lading carries no seal number; the packing list shows seal MLSE207114."},
+    {"id": "D10", "category": "consignee_mismatch", "severity": "high", "field": "consignee",
+     "evidence": [{"doc": "waybill", "value": "Harborline Trading Corp"}, {"doc": "commercial_invoice", "value": "Harborline Logistics LLC"}],
+     "required_patterns": ["Harborline Trading", "Harborline Logistics"],
+     "summary": "B/L and packing list consign to Harborline Trading Corp; the commercial invoice bills Harborline Logistics LLC -- a different legal entity."}
+  ]
+}
