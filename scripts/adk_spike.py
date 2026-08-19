@@ -9,9 +9,9 @@ consequential call by RETURNING A DICT from `before_tool_callback` and trusting
 ADK to skip the tool body. If that were false the gate would log a hold and then
 let the write happen anyway — the failure mode that looks green and is not.
 
-So the probe does not ask ADK whether it skipped; it asks the TOOL. The tool body
-increments a counter and writes a marker file. A tool body that did not run
-cannot have left a marker. That is the whole proof, and it is why this script
+So the probe does not ask ADK whether it skipped; it asks the TOOL. Each tool
+body appends to `TOOL_BODY_RUNS` before doing its work, and a body that did not
+run cannot have left a record. That is the whole proof, and it is why this script
 drives a real `Runner` over a real `LlmAgent` instead of calling the callback
 directly — calling the callback directly would only prove that our own function
 returns a dict, which was never in doubt.
