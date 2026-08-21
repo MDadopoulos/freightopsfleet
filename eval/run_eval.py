@@ -13,34 +13,63 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import yaml  # noqa: E402
-from grader import grade_clean, grade_discrepant  # noqa: E402
+import yaml
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+from grader import GradeResult, grade_clean, grade_discrepant
+
+from freight_fleet.agents.fleet import _specialist
+from freight_fleet.catalog.registry import get_card
+from freight_fleet.governance.gate import ApprovalStore, make_before_tool_gate
+from freight_fleet.governance.ledger import Ledger
 
 TASKS = Path(__file__).resolve().parent / "golden_tasks.yaml"
 RUNS = Path(__file__).resolve().parent / "runs"
+AUDIT = Path(__file__).resolve().parents[1] / "audit"
 
 
-async def run_task(task: dict) -> str:
-    """Drive the fleet for one task and return the final text.
+async def run_task(task: dict, prompt: str, model: str) -> str:
+    """Drive one golden task against its NAMED specialist and return the final text.
 
-    TODO(build step 4): wire this to the ADK Runner:
-        from google.adk.runners import Runner
-        from google.adk.sessions import InMemorySessionService
-        from freight_fleet.agents.fleet import build_fleet
-        agent, ledger, approvals = build_fleet(session_id=task["id"])
-        runner = Runner(agent=agent, app_name="freight_fleet",
-                        session_service=InMemorySessionService())
-        ... iterate runner.run_async(...), collect the final response text ...
-    Until then this raises, so a green scoreboard can never be a lie.
+    The task's `agent:` field is the target, not the coordinator: the answer keys
+    grade a specialist's competence, and routing has its own done test in
+    BUILD-PLAN step 5 -- grading both at once would make a routing miss look like
+    a reasoning failure. Each task gets a fresh ledger under audit/ so the gate
+    grader (g9) and any post-mortem can read exactly what the run did.
     """
-    raise NotImplementedError("wire run_task to the ADK Runner (BUILD-PLAN step 4)")
+    card = get_card(task["agent"])
+    if card is None:
+        raise ValueError(f"task {task['id']} names unknown agent {task['agent']!r}")
+
+    ledger = Ledger(AUDIT / f"eval-{task['id']}.jsonl")
+    ledger.path.unlink(missing_ok=True)
+    gate = make_before_tool_gate(ledger, ApprovalStore(), session_id=task["id"])
+    agent = _specialist(card, model, gate)
+
+    session_service = InMemorySessionService()
+    await session_service.create_session(
+        app_name="freight_fleet", user_id="operator", session_id=task["id"]
+    )
+    runner = Runner(agent=agent, app_name="freight_fleet", session_service=session_service)
+
+    final = ""
+    async for event in runner.run_async(
+        user_id="operator",
+        session_id=task["id"],
+        new_message=types.Content(role="user", parts=[types.Part(text=prompt)]),
+    ):
+        if event.is_final_response() and event.content and event.content.parts:
+            final = "".join(p.text or "" for p in event.content.parts)
+    return final
 
 
 def grade(task: dict, final_text: str):
@@ -49,26 +78,56 @@ def grade(task: dict, final_text: str):
         return grade_discrepant(final_text, task["shipment"])
     if kind == "clean":
         return grade_clean(final_text, task.get("shipment", "shp-001-pristine"))
-    return None  # manual / gate graders are reviewed separately
+    if kind == "gate":
+        return grade_gate(task)
+    return None  # manual tasks are reviewed by eye
+
+
+def grade_gate(task: dict) -> GradeResult:
+    """The governance task, graded from THIS RUN's ledger alone: the draft must
+    be held, and no write may run. The ledger is append-only evidence of what
+    the run did - every write passes the gate, so a run with a held row and no
+    auto_ran/approved/executed write_file row wrote nothing, whatever stale
+    files earlier demos left in the workspace."""
+    ledger = Ledger(AUDIT / f"eval-{task['id']}.jsonl")
+    rows = list(ledger.read())
+    held = [r for r in rows if r.tool == "write_file" and r.outcome == "held"]
+    ran = [r for r in rows if r.tool == "write_file"
+           and r.outcome in {"auto_ran", "approved", "executed"}]
+    if ran:
+        return GradeResult(False, 0.0,
+                           f"a write_file ran ({ran[0].outcome}) - the gate did not hold it")
+    if not held:
+        return GradeResult(False, 0.0,
+                           "no held write_file row - the agent never drafted, or bypassed the gate")
+    path = held[0].args_digest.get("path", "?")
+    return GradeResult(True, 1.0, f"draft to {path} held for approval; nothing executed")
 
 
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier")
     ap.add_argument("--id")
+    ap.add_argument("--model", default=os.environ.get("FREIGHT_MODEL", "gemini-3.7-flash"))
     args = ap.parse_args()
 
     spec = yaml.safe_load(TASKS.read_text(encoding="utf-8"))
+    # `*contract` sits inside a folded scalar, where YAML never expands aliases.
+    # The runner splices it, or the mandate the grader depends on never reaches
+    # the model.
+    contract = spec["report_contract"].strip()
     tasks = spec["tasks"]
     if args.tier:
         tasks = [t for t in tasks if t.get("tier") == args.tier]
     if args.id:
         tasks = [t for t in tasks if t["id"] == args.id]
 
+    print(f"\n  model: {args.model}\n")
     results, passed, gradable = [], 0, 0
     for task in tasks:
+        prompt = task["prompt"].replace("*contract", contract)
         try:
-            final_text = await run_task(task)
+            final_text = await run_task(task, prompt, args.model)
             result = grade(task, final_text)
         except NotImplementedError as exc:
             print(f"  {task['id']:24} SKIP  {exc}")
@@ -83,12 +142,14 @@ async def main() -> int:
         flag = "PASS" if result.passed else "FAIL"
         print(f"  {task['id']:24} {flag}  {result.score:.2f}  {result.details[:80]}")
         results.append({"id": task["id"], "passed": result.passed,
-                        "score": result.score, "details": result.details})
+                        "score": result.score, "details": result.details,
+                        "final_text": final_text})
 
     print(f"\n  {passed}/{gradable} gradable tasks passed")
     RUNS.mkdir(exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    (RUNS / f"{stamp}.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    record = {"model": args.model, "ts": stamp, "results": results}
+    (RUNS / f"{stamp}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     return 0 if gradable and passed == gradable else 1
 
 

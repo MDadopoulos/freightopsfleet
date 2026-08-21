@@ -49,6 +49,7 @@ not in the fleet.
 ## Quickstart
 
 ```bash
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env            # add your Gemini / Vertex credentials
 
@@ -57,6 +58,10 @@ export FREIGHT_WORKSPACE_ROOT=$PWD/workspace
 
 adk web                          # or: python -m freight_fleet.cli chat
 ```
+
+The venv is not politeness. On Debian-based images `pip install -e .` aborts
+trying to uninstall the system PyYAML ("RECORD file not found"), and the ADK
+never lands.
 
 Try:
 
@@ -76,6 +81,32 @@ Then ask it to draft the notice — and watch it stop for approval.
 python eval/run_eval.py --tier hero   # the two that matter
 python eval/run_eval.py               # all nine golden tasks
 ```
+
+Current standing, on `gemini-3.7-flash` (committed run record in `eval/runs/`):
+**7/7 gradable tasks pass** — all seeded discrepancies on five discrepant
+shipments, exactly zero on the strict clean control, and the governance task
+green mechanically (draft held, nothing executed). The two manual-tier tasks
+are reviewed by eye. Try the async story too:
+
+```bash
+python -m freight_fleet.cli sweep          # every open shipment, unattended
+python -m freight_fleet.cli approvals list # what the sweep held for you
+```
+
+## Verify the trust boundary
+
+The gate holds a consequential call by returning a dict from ADK's
+`before_tool_callback` and trusting the framework to skip the tool body. That is
+an unversioned framework contract, so it is checked rather than assumed — and the
+witness is the tool body's own side effect, not the framework's word for it:
+
+```bash
+python scripts/adk_spike.py     # no credentials needed
+```
+
+Verified on google-adk 2.7.1. `tests/test_adk_contract.py` runs the same probes
+under `pytest`, so an ADK upgrade that broke the contract goes red in the test
+suite rather than quietly letting held actions execute.
 
 ---
 

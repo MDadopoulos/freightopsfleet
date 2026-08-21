@@ -126,3 +126,48 @@ def test_no_agent_is_autonomous_for_consequential_work():
 
 def test_catalog_serializes_every_agent():
     assert len(catalog()) == len(FLEET)
+
+
+def test_every_fleet_desk_is_classified_for_delegation():
+    """The coordinator reaches specialists through the SAME gate seam, so each
+    desk's AgentTool name must be classified or fail-closed blocks all routing.
+    Derived from FLEET so adding a sixth desk without classifying it goes red."""
+    for card in FLEET:
+        spec, verdict = classify(card.key)
+        assert spec is not None, f"desk {card.key} is unclassified - routing would be blocked"
+        assert verdict is Verdict.AUTO, (
+            f"desk {card.key} classified {verdict}; delegation is AUTO because every "
+            "downstream tool call re-enters the gate under the specialist's name"
+        )
+
+
+def test_grant_is_single_use(gate_parts):
+    """A durable grant must buy exactly ONE execution. A reusable id would let
+    anything that ever saw it replay the action forever."""
+    _, approvals, gate = gate_parts
+    held = gate(_Tool("write_file"), {"path": "p", "content": "c"}, _Ctx())
+    aid = held["approval_id"]
+    approvals.approve(aid)
+    assert gate(_Tool("write_file"), {"path": "p", "_approval_id": aid}, _Ctx()) is None
+    again = gate(_Tool("write_file"), {"path": "p", "_approval_id": aid}, _Ctx())
+    assert again["status"] == "pending_approval", "a consumed grant must hold again"
+
+
+def test_file_store_survives_the_process(tmp_path):
+    """Holds and grants persist across store instances - the one-turn CLI dies
+    between hold and grant, so durability IS the approval surface."""
+    from freight_fleet.governance.gate import FileApprovalStore
+
+    path = tmp_path / "approvals.json"
+    store_a = FileApprovalStore(path)
+    store_a.hold("id-1", {"tool": "write_file", "args": {"path": "x"}, "agent": "cross_check"})
+
+    store_b = FileApprovalStore(path)  # "restart"
+    assert "id-1" in store_b.pending()
+    assert store_b.approve("id-1") is not None
+
+    store_c = FileApprovalStore(path)
+    assert store_c.is_granted("id-1")
+    assert not store_c.is_granted("fabricated")
+    store_c.consume("id-1")
+    assert not FileApprovalStore(path).is_granted("id-1")
