@@ -64,6 +64,16 @@ TOOL_SPECS: Final[dict[str, ToolSpec]] = {
     "grep_files": ToolSpec("grep_files", Risk.LOW,      False, "Search workspace file contents."),
     "write_file": ToolSpec("write_file", Risk.HIGH,     False, "Create or overwrite a workspace file."),
     "send_email": ToolSpec("send_email", Risk.CRITICAL, True,  "Transmit a drafted notice. NOT WIRED in V1."),
+    # Delegation to a specialist desk. LOW because the delegation itself only
+    # moves text: every tool call the specialist then makes re-enters this same
+    # gate under the specialist's own name, so nothing consequential can hide
+    # behind a hand-off. An agent NOT listed here stays BLOCK - adding a desk
+    # to the fleet means classifying it, same as any tool.
+    "cross_check":     ToolSpec("cross_check",     Risk.LOW, False, "Delegate to the document cross-check desk."),
+    "doc_intake":      ToolSpec("doc_intake",      Risk.LOW, False, "Delegate to the document intake desk."),
+    "quote_intake":    ToolSpec("quote_intake",    Risk.LOW, False, "Delegate to the quote intake desk."),
+    "tracking_triage": ToolSpec("tracking_triage", Risk.LOW, False, "Delegate to the tracking triage desk."),
+    "doc_chaser":      ToolSpec("doc_chaser",      Risk.LOW, False, "Delegate to the document chaser desk."),
 }
 
 #: Verdict floor by risk. Anything at or above HIGH stops for a human.

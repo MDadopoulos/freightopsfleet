@@ -126,3 +126,16 @@ def test_no_agent_is_autonomous_for_consequential_work():
 
 def test_catalog_serializes_every_agent():
     assert len(catalog()) == len(FLEET)
+
+
+def test_every_fleet_desk_is_classified_for_delegation():
+    """The coordinator reaches specialists through the SAME gate seam, so each
+    desk's AgentTool name must be classified or fail-closed blocks all routing.
+    Derived from FLEET so adding a sixth desk without classifying it goes red."""
+    for card in FLEET:
+        spec, verdict = classify(card.key)
+        assert spec is not None, f"desk {card.key} is unclassified - routing would be blocked"
+        assert verdict is Verdict.AUTO, (
+            f"desk {card.key} classified {verdict}; delegation is AUTO because every "
+            "downstream tool call re-enters the gate under the specialist's name"
+        )
