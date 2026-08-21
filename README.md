@@ -83,10 +83,12 @@ python eval/run_eval.py               # all nine golden tasks
 ```
 
 Current standing, on `gemini-3.7-flash` (committed run record in `eval/runs/`):
-**7/7 gradable tasks pass** — all seeded discrepancies on five discrepant
-shipments, exactly zero on the strict clean control, and the governance task
-green mechanically (draft held, nothing executed). The two manual-tier tasks
-are reviewed by eye. Try the async story too:
+**7/7 gradable tasks pass, three runs out of three** — all seeded discrepancies
+on five discrepant shipments, exactly zero on the strict clean control, and the
+governance task green mechanically (draft held, nothing executed). Run
+`eval/run_eval.py --repeat 3` to reproduce it; a task counts as passed only if
+every attempt passed, so the number cannot round up a flaky one. The two
+manual-tier tasks are reviewed by eye. Try the async story too:
 
 ```bash
 python -m freight_fleet.cli sweep               # every open shipment, unattended

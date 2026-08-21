@@ -103,22 +103,39 @@ $ python -m freight_fleet.cli chat --session ops-shp002 \
 ```
 
 **Unattended operation stops at the gate.** A scheduled sweep re-checks every
-open shipment with nobody watching:
+open shipment with nobody watching. Each shipment keeps its *own* durable
+conversation across mornings — the sweep's run id changes daily, the per-shipment
+conversation does not — so the desk resumes where it left off rather than meeting
+the same file cold every day. A shipment whose model call fails is named and
+skipped; it does not end the run, and it does not pass silently either:
 
 ```
   SWEEP sweep-2026-08-21 — 6 open shipment(s)
-  shp-001-pristine         0 discrepancies
-  shp-002-hero             4 discrepancies
-  shp-003-container-refs   3 discrepancies
-  shp-004-quote-invoice    3 discrepancies
-  shp-005-air-dg           2 discrepancies
-  shp-006-missing-doc      1 discrepancies
+  conversations are durable: sqlite+aiosqlite:///data/sessions.db
+
+  shp-001-pristine         [resumed, 12 prior events] shp-001-pristine: 0 discrepancies
+  shp-002-hero             [resumed, 8 prior events] shp-002-hero: 4 discrepancies
+  shp-003-container-refs   [new conversation] shp-003-container-refs: 3 discrepancies
+  shp-004-quote-invoice    [new conversation] shp-004-quote-invoice: 3 discrepancies
+  shp-005-air-dg           [new conversation] shp-005-air-dg: 2 discrepancies
+  shp-006-missing-doc      [new conversation] shp-006-missing-doc: 1 discrepancies
 
   5 draft(s) held for approval; nothing sent, nothing written.
+    7e9f37b3-…  outbox/MFSB-26071842-discrepancy-notice.md
 ```
 
 That last line is the requirement. It ran, nobody was watching, it found real
 problems, and it did **not** act.
+
+And a "no" stays no. The sweep and the operator write to the same approval store
+from different processes; until this was fixed, an operator who rejected a draft
+*while the sweep was still running* had the rejection overwritten by the sweep's
+next hold, and the resurrected action could then be approved and executed — the
+ledger reading `held → rejected → approved → executed` for one action. Two
+layers close it: the store re-reads before every write, and `execute_approved`
+asks the **ledger**, not the queue, whether the action was already decided. The
+queue is what is actionable; the record is what was decided, and when they
+disagree the record wins.
 
 ### 3. Production data without violating compliance or security
 
@@ -219,6 +236,29 @@ that truth.
 
 The run record is committed in `eval/runs/`.
 
+**And it holds up on repetition.** One green run can be luck, so the eval takes
+`--repeat K` and writes every attempt — there is deliberately no way to keep only
+the good ones, and a killed run leaves the attempts it finished rather than
+nothing:
+
+```
+  per-task pass rate over 3 runs:
+    g1_hero_crosscheck       3/3  1.00
+    g2_clean_control         3/3  1.00
+    g3_container_refs        3/3  1.00
+    g4_quote_vs_invoice      3/3  1.00
+    g5_air_dangerous_goods   3/3  1.00
+    g6_missing_document      3/3  1.00
+    g9_approval_gate         3/3  1.00
+
+  3/3 full runs all-green
+  per run: 7/7  7/7  7/7
+```
+
+The console's scoreboard counts **tasks, not attempts**, and a task passes only
+if every attempt did — so the headline stays `7 / 7` and cannot be inflated by
+repetition or rounded up from two runs in three.
+
 ### The clean control is the number to look at first
 
 One of those six shipments has **nothing wrong with it**. The only passing answer
@@ -252,6 +292,46 @@ document had been read — so these were procedure gaps, not context failures.
 **The grader and answer keys were never touched.** That rule is written into the
 repo's operating instructions, because a scoreboard you can adjust is a
 scoreboard that means nothing.
+
+### The one a passing score did not catch
+
+A green scoreboard is not the same as a correct answer, and we can show the
+difference on our own work.
+
+A container number carries a check digit — a weighted sum over the other ten
+characters. `MERU4106915`, printed on the B/L in one of the fixtures, fails it;
+`MERU4106195` on the packing list passes. The correct computed digit for the bad
+one is **3**.
+
+Across our committed run records the fleet said 3 three times — and **0** once.
+Twice in that one report, including inside the discrepancy notice drafted *for
+the carrier*. It scored `passed: True, score: 1.00`, because the answer key
+asserts which container numbers get named, not what the arithmetic came to. A
+confident, precise-looking, wrong number in a document addressed to a third
+party, and every instrument we had said the run was clean.
+
+The tempting fix is a prompt rule: *don't print your arithmetic*. We rejected
+it. The model would still have to do the sum to assert pass or fail — it would
+just do it invisibly, and nothing on the page would be falsifiable any more. The
+runs already showed that shape: on clean containers the fleet printed "check
+digit 4 verified", where the "computed" digit is the number's own last character
+restated. A tautology dressed as verification.
+
+So the fleet stopped doing the arithmetic. `check_container_number` computes the
+digit; the specialist calls it and reports what it returned. It reads nothing and
+writes nothing, so the gate classifies it `AUTO` — the one kind of tool that is
+genuinely safe to run unattended is the kind that cannot act. Reports now print
+`computed_check_digit: 3`, and the ledger records the calls like any other.
+
+The general rule this leaves behind: **a value read off a document is evidence; a
+value the model derived is a claim.** Where a claim has to be exact, give the
+fleet a tool that cannot get it wrong rather than a rule telling it to be careful.
+
+We are including this because it is the most useful thing we learned. Our
+governance caught what it was built to catch — nothing was written, nothing was
+sent, every call is in the ledger. It was never built to catch a wrong *number*
+inside an approved draft, and the eval could not see it either. Knowing exactly
+where your instruments stop is worth more than a scoreboard that never moved.
 
 ---
 
