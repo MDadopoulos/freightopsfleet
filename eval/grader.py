@@ -75,14 +75,35 @@ def _bullets(block: str) -> list[str]:
         if _BULLET.match(line):
             out.append(line)
         elif line.strip():
+            if out and line.startswith((" ", "\t")):
+                out[-1] += " " + line.strip()  # continuation of the current bullet
+                continue
             break
     return out
 
 
 def _matches_all(block: str, finding: dict[str, Any]) -> bool:
-    return all(
-        re.search(p, block, re.IGNORECASE) is not None
-        for p in finding.get("required_patterns") or []
+    """A finding is reported when ONE bullet carries all of its patterns.
+
+    Scoping to a single bullet, rather than to the whole block, is what makes
+    this a detection test instead of a string-presence test. Searching the block
+    passes a report that FABRICATES four findings and then, in a "checks
+    performed" table below them, prints every real conflicting value under the
+    heading "OK - reconciles" - the exact opposite of the right answer, scored
+    1.00. Verified: that report passed before this change and fails after it.
+
+    This is a TIGHTENING, and the direction matters. AGENTS.md #5 forbids
+    moving the goalposts so a failing run passes; this moves them so a wrong
+    answer fails, and it was made without consulting any run it would flip.
+    Re-graded against every committed run: the 7/7 is unchanged, and the
+    historical g4 failure still fails. The instrument got sharper, not kinder.
+    """
+    patterns = finding.get("required_patterns") or []
+    if not patterns:
+        return True
+    return any(
+        all(re.search(p, bullet, re.IGNORECASE) is not None for p in patterns)
+        for bullet in _bullets(block)
     )
 
 

@@ -145,8 +145,53 @@ retires a grant the moment it lets the replay through, so an approval id that
 leaks cannot be replayed forever.
 
 And the fleet **drafts; it never sends**. `send_email` is risk-classified as
-CRITICAL and deliberately unwired. The approval CLI refuses to execute it by
-design.
+CRITICAL and deliberately unwired. Both approval surfaces refuse to execute it by
+design — the console renders the APPROVE button *disabled*, with the reason on
+its face, which makes that invariant visible rather than asserted.
+
+### The operator console
+
+The decision surface is a web page (`src/freight_fleet/console.py`), because the
+person who approves a shipment notice does not live in a terminal.
+
+> The console adds no capability. It renders four artifacts the fleet already
+> produced — the ledger, the approval store, the scored runs, the catalog — it
+> never calls a model, and its only button goes back through the same gate the
+> agent hit.
+
+That last clause is the load-bearing one. Approving from the browser calls
+`governance.gate.execute_approved`, the **identical function** `cli approvals
+grant` calls: the replay is granted, then sent back through
+`before_tool_gate`, and executes only if the gate returns `None`. Two front
+doors, one seam — sealed by `tests/test_governance.py::test_console_approval_uses_the_same_seam`,
+which asserts the ledger gains `approved` then `executed`, both stamped
+`session_id="approval-console"`, and that the grant is retired.
+
+Building it found a real bug in the CLI path, now fixed at the seam: the store
+recorded the grant *before* discovering that a tool had no executable body,
+leaving a dangling grant and a hold that had vanished from the queue. The lookup
+now happens first, so an unwired tool leaves the action exactly where the
+operator left it. That is a tighten, so invariant 1 holds.
+
+Two more things the console does that a dashboard would not:
+
+- **It reconciles two stores and reports the disagreement.** One hold
+  (`7e9f37b3`) is in the ledger but not in the approval store. The console labels
+  it **LAPSED** and says why, instead of showing it as awaiting approval — which
+  is what the CLI's `ledger` command did. The append-only record is evidence
+  *independent of mutable state*, and that is worth showing rather than hiding.
+- **It separates recorded from derived.** Every number on screen is either
+  straight from an artifact (rendered plain) or computed by one of seven named
+  rules (rendered with a dotted underline, each rule written out in one sentence
+  at the foot of the page). The screen whose thesis is that the record is the
+  product should be able to say where every figure came from.
+
+Zero JavaScript, zero new dependencies, no chat box, no "run the sweep" button,
+no policy editor, no filters: `<details>` for expansion, `<form method="post">`
+for the two actions, `:target` for deep links, `prefers-color-scheme` for theme.
+An unauthenticated live URL with a model behind it is a cost and abuse surface
+and a coin flip on camera; the CLI is the agent's surface, the console is the
+operator's.
 
 ---
 
@@ -292,11 +337,13 @@ python -m freight_fleet.cli sweep    # the unattended run
 python -m freight_fleet.cli approvals list   # what it held for you
 ```
 
-The trust boundary can be verified without credentials at all:
+The trust boundary can be verified without credentials at all — and so can the
+whole operator surface:
 
 ```bash
 python scripts/adk_spike.py          # proves the gate short-circuits the tool body
-python -m pytest tests/ -q           # 42 tests
+python -m pytest tests/ -q           # 73 tests
+python -m freight_fleet.cli console  # the console at http://localhost:8080, no API key
 ```
 
 ---
@@ -305,7 +352,10 @@ python -m pytest tests/ -q           # 42 tests
 
 - **Repo:** https://github.com/MDadopoulos/freightopsfleet
 - **Demo video:** [ADD LINK]
-- **Live URL:** [ADD IF DEPLOYED — see `docs/DEPLOY.md`]
+- **Live URL:** [ADD IF DEPLOYED — see `docs/DEPLOY.md`]. The deployed image
+  serves the **operator console** at `/`, so the URL renders the Desk with no
+  credentials and cannot burn Gemini quota. Deploy it with
+  `FREIGHT_CONSOLE_READONLY=1` and the two decision buttons are disabled.
 - **Architecture:** `docs/ARCHITECTURE.md`
 - **Track mapping:** `HACKATHON.md`
 - **Provenance:** `docs/REUSE-LEDGER.md`

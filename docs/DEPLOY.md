@@ -4,8 +4,20 @@ Two things get deployed, from **one image**:
 
 | What | Cloud Run kind | Why it exists |
 |---|---|---|
-| **The fleet API** | Service (a live URL) | The judges can talk to it. `adk api_server` serves the coordinator and all five desks. |
+| **The operator console** | Service (a live URL) | The image's default `CMD`. A judge clicking the URL lands on the Desk — the pending count, the decision queue, the ledger, the catalog and the scoreboard — with **no `GOOGLE_API_KEY` required**, no model call, and therefore no way to burn quota or 500 on credentials. |
 | **The morning sweep** | Job + Cloud Scheduler | The track's async requirement: it runs at 06:00 with nobody watching, finds discrepancies, and **holds** every draft. |
+
+> **The default `CMD` changed.** It is now
+> `uvicorn freight_fleet.console:app --host 0.0.0.0 --port ${PORT:-8080}`.
+> To serve ADK's API instead, override it:
+> `--command sh --args "-c,adk api_server --host 0.0.0.0 --port \${PORT:-8080} /app/agents"`.
+> Both live in one image; only the entry point differs.
+>
+> **`FREIGHT_CONSOLE_READONLY=1`** disables both decision buttons and returns
+> `403` for either POST, touching neither the approval store nor the ledger. It
+> is the entire access model, and it is the right setting for a public
+> submission URL: the console is then a pure exhibit. Approvals stay on the
+> local CLI, where the durable store actually lives.
 
 They share an image on purpose. The agent that answers an operator at 14:00 and
 the one that sweeps at 06:00 must be the same fleet with the same gate, or the
@@ -105,7 +117,7 @@ one role if you switch to Vertex.)
 
 ---
 
-## 4. Deploy the API service
+## 4. Deploy the service
 
 From the repo root:
 
@@ -114,7 +126,7 @@ gcloud run deploy "$SERVICE" \
   --source . \
   --service-account "$SA" \
   --set-secrets "GOOGLE_API_KEY=gemini-api-key:latest" \
-  --set-env-vars "FREIGHT_MODEL=gemini-3.7-flash" \
+  --set-env-vars "FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_CONSOLE_READONLY=1" \
   --memory 1Gi \
   --cpu 1 \
   --timeout 600 \
@@ -128,7 +140,8 @@ What each flag is doing, and why:
   local Docker needed. `.dockerignore` keeps `eval/` — the answer keys — out of
   the build context entirely.
 - **`--set-secrets`** mounts the key as `GOOGLE_API_KEY` at runtime. It never
-  appears in config output.
+  appears in config output. The console does not read it — keep it mounted only
+  if you intend to override the `CMD` back to `adk api_server`.
 - **`--timeout 600`** matters: a cross-check reads three documents and reasons
   over them, which can take 60–90 seconds. Cloud Run's 300s default will cut off
   a slow run mid-answer.
@@ -150,12 +163,21 @@ Service URL: https://freight-ops-fleet-XXXXXXXX-ew.a.run.app
 ```bash
 export URL=$(gcloud run services describe "$SERVICE" --format='value(status.url)')
 
-# the app is discoverable
+# the console is up (no credentials involved)
+curl -s "$URL/healthz"          # expect: {"ok":true}
+curl -s "$URL/" | head -5       # the Desk
+```
+
+Open `$URL` in a browser: that is the demo surface. If you overrode the `CMD`
+back to `adk api_server`, check discoverability instead:
+
+```bash
 curl -s "$URL/list-apps"
 # expect: ["freight_ops"]
 ```
 
-Then drive one real turn:
+Then, if you are serving the ADK API, drive one real turn (the console has no
+such endpoint — it never calls a model):
 
 ```bash
 curl -s -X POST "$URL/run" \
@@ -330,7 +352,8 @@ doing less work than it appears:
 
 - A deployed URL proves the fleet **runs** in a container. It does not prove the
   governance property — that is proven by the ledger and the scoreboard, both of
-  which run identically on a laptop.
+  which run identically on a laptop. The console makes both *legible* at the URL;
+  it does not make either more true.
 - The container's workspace is **ephemeral**. Approvals granted against the
   deployed service do not survive a cold start unless you mount durable storage.
   The local CLI is the honest approval surface; the URL is the demo surface.

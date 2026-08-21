@@ -35,35 +35,47 @@ When the report lands, read the verdict line out loud. Four discrepancies, with
 severities. Note that it also lists the checks it *couldn't* perform — that
 honesty is the feature, not filler.
 
-## 1:10–1:40 — The gate (the moment that wins the track)
+## 1:10–1:40 — The gate, in the operator console (the moment that wins the track)
+
+Keep the terminal for the sweep and the scoreboard. Switch to the browser for
+the *decision* — the contrast between the terminal doing the work and the
+console holding the decisions is itself the argument.
 
 ```bash
-python -m freight_fleet.cli chat --session demo \
-  "Draft the discrepancy notice and save it to outbox/shp-002-notice.md"
+python -m freight_fleet.cli console      # no credentials, no model, zero JS
 ```
 
-It drafts. Then it stops.
+Record at **390×844** so it reads on a phone. The path is deterministic and
+offline: no model call, so it cannot fail live on camera.
 
-> "This is where it holds. Writing that notice is consequential, so it never
-> happens unattended — the agent tells me what's waiting and gives me an
-> approval id. Nothing is in outbox yet."
+| t | Screen | What the viewer sees | Line to say |
+|---|---|---|---|
+| **0:00** | `/` | A huge **5 · DECISIONS WAITING**, beside it **0 IN OUTBOX** and **0 TRANSMITTED**, and the sentence: *the sweep ran 08:18–08:21, read 19 documents across 6 shipments, made 39 gate decisions, wrote nothing and sent nothing.* | "It worked all night and left me five decisions. Nobody was awake for any of it." |
+| **0:03** | `/` | One scroll notch. Top card: `▲ THE DRAFT SAYS "CRITICAL"` — undeclared lithium batteries on an air shipment. The other four calm. Below them: *CLEARED — 1 shipment checked, nothing to report.* | "It ranked one first, because the notice itself says critical. And one shipment came back clean — that one's the control." |
+| **0:06** | tap the card | `/decision/061a64c3…`. Amber **HELD — THIS HAS NOT RUN**, `write_file · risk HIGH · verdict ASK`. Then *IF YOU APPROVE: write_file will create outbox/…notice.md — 2,569 characters. The file does not exist yet. Nothing is emailed.* Then the notice. Then the three documents it read. | "Here's what it wants to do, what happens if I say yes, and the three documents it read to write it." |
+| **0:12** | tap **APPROVE** | Back on the Desk. Green strip: *APPROVED — write_file executed, bytes written, grant retired (single-use), two ledger rows written.* **The numeral is 4. IN OUTBOX is 1.** Nav badge is 4. | "One click. It goes back through the same gate the agent hit, and the grant is retired — that id can never run again." |
+| **0:16** | tap **Ledger** | `56 DECISIONS · 47 RAN · 7 HELD · 1 APPROVED · 1 EXECUTED`, then `append-only · sha256 …`. A new `approval-console` band at the top: **HELD → APPROVED → EXECUTED**, seconds apart, joined by one approval id. | "And here's the record — who, what, when, and under whose authority." |
 
-Show the empty `outbox/`. Then, on camera:
+**The single strongest frame is at 0:12: `0 → 1 IN OUTBOX` changing because a
+human clicked**, with `5 → 4` beside it and the audit chain one tap away. That is
+the whole submission in two numbers.
+
+Reset before the next take:
 
 ```bash
-python -m freight_fleet.cli approvals list     # the draft, previewed
-ls workspace/outbox                            # empty
-python -m freight_fleet.cli approvals grant <id>
-ls workspace/outbox                            # the notice exists
-python -m freight_fleet.cli ledger             # held -> approved -> executed
+git checkout data/approvals.json 2>/dev/null || cp backup/approvals.json data/
+rm -f workspace/outbox/*
 ```
 
-> "That's what the ops lead shows their boss."
+(`audit/`, `data/` and `workspace/` are gitignored — keep a copy of
+`audit/ledger.jsonl` and `data/approvals.json` before the first take.)
 
 ## 1:40–2:10 — The fleet and the catalog
 
-Show `catalog()`: five agents, three departments, each with an accountable owner,
-a data scope, and an autonomy level.
+Show the console's `/fleet` (or `catalog()` in the terminal): five agents, three
+departments, each with an accountable owner, a data scope, and an autonomy level.
+Point at one chip — `write_file HIGH·HOLDS` in amber — and at the last row of the
+tool table: `ANY TOOL NOT IN THIS TABLE → BLOCK`.
 
 > "Import ops, procurement, customer service. Each declares what it may touch and
 > what it's allowed to do on its own. An agent that isn't in the catalog isn't in

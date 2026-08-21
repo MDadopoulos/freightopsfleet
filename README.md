@@ -91,7 +91,14 @@ are reviewed by eye. Try the async story too:
 ```bash
 python -m freight_fleet.cli sweep          # every open shipment, unattended
 python -m freight_fleet.cli approvals list # what the sweep held for you
+python -m freight_fleet.cli console        # the operator console at http://localhost:8080
 ```
+
+`console` needs **no credentials** — it renders four artifacts the fleet already
+produced (the ledger, the approval store, the catalog, the committed runs), never
+calls a model, and ships zero JavaScript. Its one button replays the held call
+through the same `before_tool_gate` the agent hit. Set
+`FREIGHT_CONSOLE_READONLY=1` to serve it with both buttons disabled.
 
 ## Verify the trust boundary
 

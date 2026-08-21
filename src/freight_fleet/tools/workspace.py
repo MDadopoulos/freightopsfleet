@@ -120,3 +120,20 @@ def write_file(path: str, content: str) -> dict:
         return {"status": "ok", "path": path, "bytes": len(content.encode("utf-8"))}
     except WorkspaceError as exc:
         return {"status": "error", "message": str(exc)}
+
+
+#: Tool name -> the plain function behind it. ONE mapping, imported by the ADK
+#: assembly (which wraps each as a FunctionTool) and by the approval surfaces
+#: (which replay one through the gate). Names MUST match
+#: `governance.policy.TOOL_SPECS`, or the gate cannot classify the call.
+#:
+#: It lives here rather than in `agents/fleet.py` because importing that module
+#: pulls in `google.adk` — and the operator console must render with no ADK, no
+#: credentials and no possibility of a model call.
+TOOL_FNS = {
+    "read_file": read_file,
+    "list_files": list_files,
+    "glob_files": glob_files,
+    "grep_files": grep_files,
+    "write_file": write_file,
+}

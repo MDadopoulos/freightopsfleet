@@ -6,6 +6,7 @@
     python -m freight_fleet.cli ledger [--session SID]
     python -m freight_fleet.cli approvals list
     python -m freight_fleet.cli approvals grant <approval_id>
+    python -m freight_fleet.cli console [--port 8080]
 
 `chat` runs ONE turn against the coordinator on a DURABLE session
 (DatabaseSessionService over SQLite): each invocation is its own process, so
@@ -15,9 +16,14 @@ continues the same conversation with its history. Vertex AI sessions are the
 deploy-time swap; the session id and app name do not change.
 
 `catalog` and `ledger` work today with no credentials — they read code-owned data
-and the JSONL ledger. `approvals` needs the running fleet process to share an
-ApprovalStore, so wire it to your server in BUILD-PLAN step 7; the read side
-(listing what the ledger says is held) works standalone right now.
+and the JSONL ledger. `approvals` shares the durable `FileApprovalStore` with the
+fleet process, so a hold placed by the sweep is grantable from a later shell.
+
+`console` serves the same four artifacts — ledger, approval store, catalog,
+committed runs — as HTML for an operator who does not live in a terminal. It
+never calls a model, and its approve button goes through
+`governance.gate.execute_approved`, the identical function `approvals grant`
+calls. Two front doors, one seam.
 """
 
 from __future__ import annotations
@@ -188,8 +194,11 @@ def cmd_ledger(args: argparse.Namespace) -> int:
 
 
 def cmd_approvals(args: argparse.Namespace) -> int:
+    """List, grant or reject. Grant and reject are thin printers over
+    `governance.gate` — the replay lives at the seam, not in the front door, so
+    the console cannot drift from the CLI about what approving means."""
     from .agents.fleet import _TOOL_FNS
-    from .governance.gate import make_before_tool_gate
+    from .governance.gate import execute_approved, reject_approved
 
     store = _approval_store()
 
@@ -219,60 +228,38 @@ def cmd_approvals(args: argparse.Namespace) -> int:
     aid = args.approval_id
 
     if args.action == "reject":
-        payload = store.reject(aid)
-        if payload is None:
+        res = reject_approved(aid, ledger=Ledger(_LEDGER_PATH), approvals=store,
+                              source="approval-cli")
+        if res.status == "not_pending":
             print(f"  no pending approval {aid}")
             return 1
-        Ledger(_LEDGER_PATH).append(_decision_row(payload, aid, "rejected", "operator rejected"))
-        print(f"  rejected {aid} ({payload.get('tool')} {payload.get('args', {}).get('path', '')})")
+        print(f"  rejected {aid} ({res.tool} {res.path})")
         return 0
 
     # grant: mark granted, then REPLAY THROUGH THE GATE - the seam stays single.
-    payload = store.approve(aid)
-    if payload is None:
+    res = execute_approved(aid, ledger=Ledger(_LEDGER_PATH), approvals=store,
+                           tool_fns=_TOOL_FNS, source="approval-cli")
+    if res.status == "not_pending":
         print(f"  no pending approval {aid}")
         return 1
-    name = payload["tool"]
-    fn = _TOOL_FNS.get(name)
-    if fn is None:
-        print(f"  {name} has no executable body wired (by design for send_email)")
+    if res.status == "not_executable":
+        print(f"  {res.tool} has no executable body wired (by design for send_email)")
         return 1
-    ledger = Ledger(_LEDGER_PATH)
-    gate = make_before_tool_gate(ledger, store, session_id="approval-cli")
-    replay_args = dict(payload.get("args") or {})
-    replay_args["_approval_id"] = aid
-
-    class _ReplayTool:
-        pass
-
-    tool = _ReplayTool()
-    tool.name = name
-
-    class _ReplayCtx:
-        agent_name = payload.get("agent", "operator")
-
-    verdict = gate(tool, replay_args, _ReplayCtx())
-    if verdict is not None:
-        print(f"  gate refused the replay: {verdict.get('status')} - not executing")
+    if res.status == "gate_refused":
+        print(f"  gate refused the replay: {(res.gate or {}).get('status')} - not executing")
         return 1
-    replay_args.pop("_approval_id", None)
-    result = fn(**replay_args)
-    ledger.append(_decision_row(payload, aid, "executed",
-                                f"replayed after approval; result status={result.get('status')}"))
-    print(f"  executed {name} -> {result}")
+    print(f"  executed {res.tool} -> {res.path} ({res.bytes} bytes, {res.detail})")
     return 0
 
 
-def _decision_row(payload: dict, approval_id: str, outcome: str, detail: str):
-    from .governance.gate import digest_args
-    from .governance.ledger import LedgerEntry
+def cmd_console(args: argparse.Namespace) -> int:
+    """Serve the operator console. No credentials, no model — every page is a
+    read of the ledger, the approval store, the catalog or a committed run."""
+    import uvicorn
 
-    return LedgerEntry.new(
-        session_id="approval-cli", agent="operator", tool=payload.get("tool", "?"),
-        risk="high", verdict="ask", outcome=outcome,
-        args_digest=digest_args(payload.get("args") or {}),
-        approval_id=approval_id, detail=detail,
-    )
+    print(f"\n  operator console on http://{args.host}:{args.port}  (no credentials needed)\n")
+    uvicorn.run("freight_fleet.console:app", host=args.host, port=args.port, log_level="info")
+    return 0
 
 
 def main() -> int:
@@ -300,6 +287,11 @@ def main() -> int:
     p_appr.add_argument("action", choices=["list", "grant", "reject"])
     p_appr.add_argument("approval_id", nargs="?")
     p_appr.set_defaults(fn=cmd_approvals)
+
+    p_console = sub.add_parser("console", help="serve the operator console (no credentials)")
+    p_console.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
+    p_console.add_argument("--host", default="127.0.0.1")
+    p_console.set_defaults(fn=cmd_console)
 
     args = ap.parse_args()
     return args.fn(args)
