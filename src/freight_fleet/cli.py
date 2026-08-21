@@ -29,8 +29,15 @@ from .governance.ledger import Ledger
 
 _LEDGER_PATH = os.environ.get("FREIGHT_LEDGER_PATH", "audit/ledger.jsonl")
 _SESSIONS_DB = os.environ.get("FREIGHT_SESSIONS_DB", "sqlite+aiosqlite:///./data/sessions.db")
+_APPROVALS_PATH = os.environ.get("FREIGHT_APPROVALS_PATH", "data/approvals.json")
 _APP = "freight_fleet"
 _USER = "operator"
+
+
+def _approval_store():
+    from .governance.gate import FileApprovalStore
+
+    return FileApprovalStore(_APPROVALS_PATH)
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
@@ -57,7 +64,8 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 app_name=_APP, user_id=_USER, session_id=args.session
             )
         coordinator, _, _ = build_fleet(
-            model=args.model, ledger=Ledger(_LEDGER_PATH), session_id=args.session
+            model=args.model, ledger=Ledger(_LEDGER_PATH),
+            approvals=_approval_store(), session_id=args.session,
         )
         runner = Runner(agent=coordinator, app_name=_APP, session_service=session_service)
         print(f"\n  session {args.session} "
@@ -115,11 +123,91 @@ def cmd_ledger(args: argparse.Namespace) -> int:
 
 
 def cmd_approvals(args: argparse.Namespace) -> int:
+    from .agents.fleet import _TOOL_FNS
+    from .governance.gate import make_before_tool_gate
+
+    store = _approval_store()
+
     if args.action == "list":
-        return cmd_ledger(argparse.Namespace(session=None))
-    print("\n  Granting requires the running fleet process (BUILD-PLAN step 7).\n"
-          "  Wire this to the server that owns the ApprovalStore.\n")
-    return 1
+        pending = store.pending()
+        if not pending:
+            print("\n  no actions awaiting approval\n")
+            return 0
+        print(f"\n  {len(pending)} action(s) awaiting approval\n")
+        for aid, payload in pending.items():
+            print(f"  {aid}")
+            print(f"    agent {payload.get('agent')}  tool {payload.get('tool')}")
+            args_ = payload.get("args") or {}
+            print(f"    path  {args_.get('path', '?')}")
+            if "content" in args_:
+                preview = str(args_["content"])[:400].rstrip()
+                print("    --- draft ---")
+                for line in preview.splitlines():
+                    print(f"    | {line}")
+                print("    --- end ---")
+        print()
+        return 0
+
+    if not args.approval_id:
+        print("  approval id required")
+        return 1
+    aid = args.approval_id
+
+    if args.action == "reject":
+        payload = store.reject(aid)
+        if payload is None:
+            print(f"  no pending approval {aid}")
+            return 1
+        Ledger(_LEDGER_PATH).append(_decision_row(payload, aid, "rejected", "operator rejected"))
+        print(f"  rejected {aid} ({payload.get('tool')} {payload.get('args', {}).get('path', '')})")
+        return 0
+
+    # grant: mark granted, then REPLAY THROUGH THE GATE - the seam stays single.
+    payload = store.approve(aid)
+    if payload is None:
+        print(f"  no pending approval {aid}")
+        return 1
+    name = payload["tool"]
+    fn = _TOOL_FNS.get(name)
+    if fn is None:
+        print(f"  {name} has no executable body wired (by design for send_email)")
+        return 1
+    ledger = Ledger(_LEDGER_PATH)
+    gate = make_before_tool_gate(ledger, store, session_id="approval-cli")
+    replay_args = dict(payload.get("args") or {})
+    replay_args["_approval_id"] = aid
+
+    class _ReplayTool:
+        pass
+
+    tool = _ReplayTool()
+    tool.name = name
+
+    class _ReplayCtx:
+        agent_name = payload.get("agent", "operator")
+
+    verdict = gate(tool, replay_args, _ReplayCtx())
+    if verdict is not None:
+        print(f"  gate refused the replay: {verdict.get('status')} - not executing")
+        return 1
+    replay_args.pop("_approval_id", None)
+    result = fn(**replay_args)
+    ledger.append(_decision_row(payload, aid, "executed",
+                                f"replayed after approval; result status={result.get('status')}"))
+    print(f"  executed {name} -> {result}")
+    return 0
+
+
+def _decision_row(payload: dict, approval_id: str, outcome: str, detail: str):
+    from .governance.gate import digest_args
+    from .governance.ledger import LedgerEntry
+
+    return LedgerEntry.new(
+        session_id="approval-cli", agent="operator", tool=payload.get("tool", "?"),
+        risk="high", verdict="ask", outcome=outcome,
+        args_digest=digest_args(payload.get("args") or {}),
+        approval_id=approval_id, detail=detail,
+    )
 
 
 def main() -> int:
@@ -139,7 +227,7 @@ def main() -> int:
     p_ledger.set_defaults(fn=cmd_ledger)
 
     p_appr = sub.add_parser("approvals", help="list or grant pending approvals")
-    p_appr.add_argument("action", choices=["list", "grant"])
+    p_appr.add_argument("action", choices=["list", "grant", "reject"])
     p_appr.add_argument("approval_id", nargs="?")
     p_appr.set_defaults(fn=cmd_approvals)
 

@@ -20,6 +20,9 @@ version you pin — it is the single load-bearing framework assumption here.
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 from typing import Any
 
 from .ledger import Ledger, LedgerEntry
@@ -44,7 +47,13 @@ def digest_args(args: dict[str, Any]) -> dict[str, Any]:
 
 
 class ApprovalStore:
-    """Pending approvals, keyed by id. In-memory for V1; swap for Firestore later."""
+    """Pending approvals, keyed by id. In-memory base; FileApprovalStore persists.
+
+    A grant is SINGLE-USE: `consume` retires it the moment the gate lets the
+    replay through. A reusable grant would let anything that ever saw the id
+    replay the action forever - with a durable store that stops being a
+    theoretical problem, so the grant tightens to one execution per approval.
+    """
 
     def __init__(self) -> None:
         self._pending: dict[str, dict[str, Any]] = {}
@@ -52,6 +61,7 @@ class ApprovalStore:
 
     def hold(self, approval_id: str, payload: dict[str, Any]) -> None:
         self._pending[approval_id] = payload
+        self._save()
 
     def pending(self) -> dict[str, dict[str, Any]]:
         return dict(self._pending)
@@ -60,13 +70,45 @@ class ApprovalStore:
         payload = self._pending.pop(approval_id, None)
         if payload is not None:
             self._granted.add(approval_id)
+        self._save()
         return payload
 
     def reject(self, approval_id: str) -> dict[str, Any] | None:
-        return self._pending.pop(approval_id, None)
+        payload = self._pending.pop(approval_id, None)
+        self._save()
+        return payload
 
     def is_granted(self, approval_id: str | None) -> bool:
         return bool(approval_id) and approval_id in self._granted
+
+    def consume(self, approval_id: str) -> None:
+        """Retire a grant after its one permitted execution."""
+        self._granted.discard(approval_id)
+        self._save()
+
+    def _save(self) -> None:  # no-op in memory; FileApprovalStore persists
+        pass
+
+
+class FileApprovalStore(ApprovalStore):
+    """ApprovalStore persisted as JSON, so holds survive the one-turn CLI process
+    and a later `approvals grant` can find them. Same contract, same single-use
+    grants - durability must not loosen anything."""
+
+    def __init__(self, path: str | os.PathLike[str]) -> None:
+        super().__init__()
+        self.path = Path(path)
+        if self.path.exists():
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            self._pending = dict(raw.get("pending", {}))
+            self._granted = set(raw.get("granted", []))
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(
+            json.dumps({"pending": self._pending, "granted": sorted(self._granted)}, indent=2),
+            encoding="utf-8",
+        )
 
 
 def make_before_tool_gate(ledger: Ledger, approvals: ApprovalStore, session_id: str):
@@ -84,6 +126,7 @@ def make_before_tool_gate(ledger: Ledger, approvals: ApprovalStore, session_id: 
         # An already-approved replay carries its grant in state.
         approval_id = (args or {}).get("_approval_id")
         if verdict is Verdict.ASK and approvals.is_granted(approval_id):
+            approvals.consume(approval_id)  # single-use: a grant buys ONE execution
             ledger.append(LedgerEntry.new(
                 session_id=session_id, agent=agent, tool=name,
                 risk=spec.risk.value if spec else "unknown", verdict=verdict.value,
