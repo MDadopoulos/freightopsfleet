@@ -8,7 +8,7 @@ dependencies = [
     # returning a dict short-circuits the tool body (tests/test_adk_contract.py).
     # Upper bound because that contract is load-bearing and unversioned — a
     # major bump must re-run the spike before it is allowed in.
-    "google-adk>=2.7.1,<3",
+    "google-adk[db]>=2.7.1,<3",  # [db]: DatabaseSessionService for durable local sessions (step 6a)
     "google-genai>=2.18.1,<3",
     "pyyaml>=6.0",
 ]

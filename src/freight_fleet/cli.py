@@ -1,9 +1,17 @@
-"""Fleet CLI — catalog, approvals, ledger.
+"""Fleet CLI — chat, catalog, approvals, ledger.
 
+    python -m freight_fleet.cli chat --session SID "message"
     python -m freight_fleet.cli catalog
     python -m freight_fleet.cli ledger [--session SID]
     python -m freight_fleet.cli approvals list
     python -m freight_fleet.cli approvals grant <approval_id>
+
+`chat` runs ONE turn against the coordinator on a DURABLE session
+(DatabaseSessionService over SQLite): each invocation is its own process, so
+"kill the process, restart it, resume the session" is not a demo trick here —
+it is simply how the command works. The same session id in a later invocation
+continues the same conversation with its history. Vertex AI sessions are the
+deploy-time swap; the session id and app name do not change.
 
 `catalog` and `ledger` work today with no credentials — they read code-owned data
 and the JSONL ledger. `approvals` needs the running fleet process to share an
@@ -20,6 +28,52 @@ from .catalog.registry import catalog
 from .governance.ledger import Ledger
 
 _LEDGER_PATH = os.environ.get("FREIGHT_LEDGER_PATH", "audit/ledger.jsonl")
+_SESSIONS_DB = os.environ.get("FREIGHT_SESSIONS_DB", "sqlite+aiosqlite:///./data/sessions.db")
+_APP = "freight_fleet"
+_USER = "operator"
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    import asyncio
+    from pathlib import Path
+
+    from google.adk.runners import Runner
+    from google.adk.sessions import DatabaseSessionService
+    from google.genai import types
+
+    from .agents.fleet import build_fleet
+
+    if ":///" in _SESSIONS_DB and _SESSIONS_DB.startswith("sqlite"):
+        Path(_SESSIONS_DB.split(":///", 1)[1]).parent.mkdir(parents=True, exist_ok=True)
+
+    async def turn() -> int:
+        session_service = DatabaseSessionService(db_url=_SESSIONS_DB)
+        session = await session_service.get_session(
+            app_name=_APP, user_id=_USER, session_id=args.session
+        )
+        resumed = session is not None
+        if not resumed:
+            await session_service.create_session(
+                app_name=_APP, user_id=_USER, session_id=args.session
+            )
+        coordinator, _, _ = build_fleet(
+            model=args.model, ledger=Ledger(_LEDGER_PATH), session_id=args.session
+        )
+        runner = Runner(agent=coordinator, app_name=_APP, session_service=session_service)
+        print(f"\n  session {args.session} "
+              f"({'resumed, ' + str(len(session.events)) + ' prior events' if resumed else 'new'})\n")
+        final = ""
+        async for event in runner.run_async(
+            user_id=_USER,
+            session_id=args.session,
+            new_message=types.Content(role="user", parts=[types.Part(text=args.message)]),
+        ):
+            if event.is_final_response() and event.content and event.content.parts:
+                final = "".join(p.text or "" for p in event.content.parts)
+        print(final)
+        return 0
+
+    return asyncio.run(turn())
 
 
 def cmd_catalog(_args: argparse.Namespace) -> int:
@@ -71,6 +125,12 @@ def cmd_approvals(args: argparse.Namespace) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(prog="freight_fleet.cli")
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_chat = sub.add_parser("chat", help="one turn against the coordinator on a durable session")
+    p_chat.add_argument("message")
+    p_chat.add_argument("--session", default="local")
+    p_chat.add_argument("--model", default=os.environ.get("FREIGHT_MODEL", "gemini-3.7-flash"))
+    p_chat.set_defaults(fn=cmd_chat)
 
     sub.add_parser("catalog", help="print the fleet catalog").set_defaults(fn=cmd_catalog)
 
