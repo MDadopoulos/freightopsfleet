@@ -57,13 +57,16 @@ from google.adk.tools.agent_tool import AgentTool
 from ..catalog.registry import FLEET, AgentCard
 from ..governance.gate import ApprovalStore, make_before_tool_gate
 from ..governance.ledger import Ledger
-from ..tools import workspace
+from ..tools import containers, workspace
 
 _PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 
 #: Tool name -> the plain function ADK wraps. Defined once in `tools.workspace`
 #: so the CLI and the console replay exactly the bodies the agents ran.
-_TOOL_FNS = workspace.TOOL_FNS
+# Workspace tools plus the deterministic checkers. Merged here rather than in
+# `workspace` because a checker touches no workspace: it is arithmetic the fleet
+# must not improvise, not I/O it must not do unsupervised.
+_TOOL_FNS = {**workspace.TOOL_FNS, **containers.TOOL_FNS}
 
 COORDINATOR_INSTRUCTION = """
 You run the ops desk of a freight forwarder. You do not do the specialist work

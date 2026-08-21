@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from grader import grade_clean, grade_discrepant
 
 ROOT = Path(__file__).resolve().parents[1]

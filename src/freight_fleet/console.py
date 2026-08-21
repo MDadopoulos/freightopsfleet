@@ -16,6 +16,15 @@ writes that file from another process. So every request constructs a fresh store
 and re-reads the ledger. There are no module-level caches and no globals holding
 state: 56 rows is under a millisecond, and a cached audit trail is a lie.
 
+THE RECORD vs THE QUEUE. The approval store is the authority for what is
+actionable; the ledger is the authority for what happened. That split is right
+and the console keeps it — a work queue is never reconstructed from the ledger.
+But the console also CHECKS the two for agreement, on the screen that answers
+"is anything waiting?", because "0 waiting" printed while the ledger holds five
+unresolved rows is a false sentence about the console's own evidence. The check
+is `governance.gate.reconcile`: it reads both files and reports; it classifies
+nothing and writes nothing, so it is not a second policy check.
+
 RECORDED vs DERIVED. Every value on screen is one of two kinds and the page says
 which. RECORDED comes straight from the ledger, the approval store, the catalog
 or a run file, and renders plain. DERIVED is computed by a named rule (D1..D7
@@ -49,7 +58,15 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 
 from .catalog.registry import FLEET
 from .governance import policy
-from .governance.gate import FileApprovalStore, execute_approved, reject_approved
+from .governance.gate import (
+    RESOLVING_OUTCOMES,
+    FileApprovalStore,
+    Reconciliation,
+    execute_approved,
+    open_store,
+    reconcile,
+    reject_approved,
+)
 from .governance.ledger import Ledger, LedgerEntry
 from .tools import workspace
 
@@ -125,11 +142,31 @@ def load_ledger() -> list[LedgerEntry]:
 
 def load_pending() -> dict[str, dict[str, Any]]:
     """What is actionable right now. The store is the authority for the queue —
-    a work queue reconstructed from the ledger would be a second source of truth."""
-    try:
-        return FileApprovalStore(_approvals_path()).pending()
-    except (OSError, ValueError):
-        return {}
+    a work queue reconstructed from the ledger would be a second source of truth.
+
+    An unreadable store returns `{}` here, which on its own is indistinguishable
+    from an empty queue — so every screen that renders a COUNT pairs this with
+    `load_reconciliation()`, which keeps the two apart.
+    """
+    store = open_store(_approvals_path())
+    return store.pending() if store is not None else {}
+
+
+def load_reconciliation(entries: list[LedgerEntry] | None = None) -> Reconciliation:
+    """The record against the queue, recomputed per request like everything else.
+
+    Always fed from `load_ledger()`, never from `Ledger.read()`: this console
+    renders an unparseable line rather than skipping it, and a reconciler that
+    raised on the same line would make the divergence check the one thing on the
+    page that cannot survive a damaged ledger.
+    """
+    rows = load_ledger() if entries is None else entries
+    return reconcile(Ledger(_ledger_path()), open_store(_approvals_path()), rows=rows)
+
+
+def stranded_count(entries: list[LedgerEntry] | None = None) -> int:
+    """The nav badge's warning half. Pass `entries` if the page already has them."""
+    return len(load_reconciliation(entries).stranded)
 
 
 def load_runs() -> list[dict[str, Any]]:
@@ -304,11 +341,18 @@ def hold_status(entry: LedgerEntry, entries: list[LedgerEntry],
     that the append-only ledger is evidence INDEPENDENT of mutable state, and
     that the console reconciles two stores and reports the disagreement rather
     than papering over it. The word is LAPSED, not "expired": there is no timer.
+
+    LAPSED here and `stranded` in `governance.gate.reconcile` are THE SAME
+    CONDITION seen from opposite sides — the record's side and the queue's. One
+    condition with two names is a wart; unifying them touches `tests/test_console`
+    and belongs in its own change. The resolving set, at least, is now imported
+    rather than restated: this file said {approved, rejected, executed} and
+    `cli.py` said {approved, rejected}, and they agreed only by luck.
     """
     if entry.entry_id in pending:
         return "awaiting", None
     for e in entries:
-        if e.approval_id == entry.entry_id and e.outcome in {"approved", "rejected", "executed"}:
+        if e.approval_id == entry.entry_id and e.outcome in RESOLVING_OUTCOMES:
             return "resolved", e
     return "lapsed", None
 
@@ -378,6 +422,7 @@ code,pre,.mono{font-family:var(--mono)}
 .navlinks a[aria-current="page"]{color:var(--ink);box-shadow:inset 0 -3px 0 var(--accent)}
 .badge{margin-left:6px;font:700 12.5px/1 var(--mono);background:var(--held-tint);
      color:var(--held);border-radius:4px;padding:3px 6px}
+.badge.warn{background:var(--blocked-tint);color:var(--blocked)}
 
 /* layout */
 .wrap{max-width:920px;margin-inline:auto;padding:32px 20px 96px}
@@ -545,13 +590,22 @@ def esc(value: Any) -> str:
 
 
 def _shell(title: str, body: str, *, active: str = "", pending: int = 0,
-           show_footer: bool = True) -> str:
-    """The page frame. One CSS string, one nav, one footer, no script tag."""
+           stranded: int = 0, show_footer: bool = True) -> str:
+    """The page frame. One CSS string, one nav, one footer, no script tag.
+
+    Two badges, never summed. `pending` is a WORK COUNT — things you can decide.
+    `stranded` is a WARNING — things the record says were held that the queue
+    cannot act on. Adding them would turn a broken queue into a fuller-looking
+    one, which is the exact confusion this whole change exists to remove.
+    """
     def link(href: str, text: str, key: str, badge: str = "") -> str:
         cur = ' aria-current="page"' if key == active else ""
         return f'<a href="{href}"{cur}>{esc(text)}{badge}</a>'
 
     badge = f'<span class="badge">{pending}</span>' if pending else ""
+    if stranded:
+        badge += (f'<span class="badge warn" title="held in the ledger, absent from the '
+                  f'approval store">⚠ {stranded}</span>')
     nav = (
         '<div class="nav"><div class="in">'
         '<span class="brand">Freight Ops<span class="long"> Fleet · Operator Console</span></span>'
@@ -701,6 +755,7 @@ _STATES: dict[str, State] = {
     "approved": State("APPROVED", "✓", "rail-solid", "approved", "tint-approved"),
     "executed": State("EXECUTED", "▶", "rail-solid", "executed", "tint-executed", True),
     "rejected": State("REJECTED", "✕", "rail-striped", "rejected", "tint-rejected", True),
+    "abandoned": State("ABANDONED", "⌀", "rail-striped", "blocked", "tint-blocked", True),
     "blocked": State("BLOCKED", "■", "rail-solid", "blocked", "tint-blocked", True),
     UNREADABLE: State("UNREADABLE LINE", "▨", "rail-striped", "blocked", "tint-blocked"),
 }
@@ -802,6 +857,7 @@ class Sweep:
     nships: int
     nrows: int
     nexecuted: int
+    nheld: int
 
 
 def latest_sweep(entries: list[LedgerEntry]) -> Sweep | None:
@@ -825,7 +881,8 @@ def latest_sweep(entries: list[LedgerEntry]) -> Sweep | None:
     age = "" if days < 1 else f" ({days} day{'s' if days != 1 else ''} ago)"
     return Sweep(session, _time(rows[0].ts)[:5], _time(rows[-1].ts)[:5], date, age, days < 1,
                  len(docs), len(ships), len(rows),
-                 sum(1 for e in rows if e.outcome == "executed"))
+                 sum(1 for e in rows if e.outcome == "executed"),
+                 sum(1 for e in rows if e.outcome == "held"))
 
 
 def sweep_sentence(sweep: Sweep) -> str:
@@ -856,8 +913,9 @@ DERIVATIONS = [
         "else is an operator session by another name.")),
     ("D7 hold status", (
         "awaiting if the id is in the approval store; resolved if a later ledger row carries it as "
-        "approved / rejected / executed; otherwise LAPSED — in the record, absent from the store, "
-        "therefore never executable.")),
+        "approved / rejected / executed / abandoned; otherwise LAPSED — in the record, absent "
+        "from the store, therefore never executable, and never recoverable: the draft lived only "
+        "in the store. `approvals reconcile` calls this same condition <em>stranded</em>.")),
 ]
 
 
@@ -964,6 +1022,36 @@ def healthz() -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+@app.get("/reconcile.json")
+def reconcile_json() -> JSONResponse:
+    """The divergence, machine-readable — a sibling of /healthz, not part of it.
+
+    Liveness must stay file-free: a probe that fails because the approval store
+    is corrupt would restart the container instead of telling anyone what is
+    wrong. This route reads two files, is cheap enough to poll, and returns 200
+    even when diverged — the divergence is the payload, not an outage.
+    """
+    recon = load_reconciliation()
+    return JSONResponse({
+        "diverged": recon.diverged,
+        "store_readable": recon.store_readable,
+        "awaiting": len(recon.awaiting),
+        "stranded": len(recon.stranded),
+        "orphaned": len(recon.orphaned),
+        "dangling_grants": len(recon.dangling_grants),
+        # Ids only, and the shape of what was lost. Never a draft body: there is
+        # none to serve, and a placeholder of the right length would fingerprint
+        # identically to the original action.
+        "stranded_detail": [
+            {"approval_id": st.approval_id, "ts": st.ts, "session_id": st.session_id,
+             "agent": st.agent, "tool": st.tool, "path": st.path,
+             "content_chars": st.content_chars, "reason": st.reason,
+             "draft_recoverable": False}
+            for st in recon.stranded
+        ],
+    })
+
+
 # --- screen 1: the Desk ------------------------------------------------------
 
 def _flash(entries: list[LedgerEntry], pending: dict[str, Any], decided: str, why: str) -> str:
@@ -1038,6 +1126,20 @@ def _flash(entries: list[LedgerEntry], pending: dict[str, Any], decided: str, wh
                 f'Nothing was written. <a href="/decision/{esc(decided)}">Review it ↗</a>'
                 "</div></div>")
 
+    # A stranded hold also lands here, and "already decided" would be a plain
+    # falsehood about it: nobody decided anything, the store lost the entry. The
+    # POST failed closed — `execute_approved` found nothing pending — but the
+    # operator is owed the real reason.
+    held_row = next((e for e in entries
+                     if e.entry_id == decided and e.outcome == "held"), None)
+    if held_row is not None and hold_status(held_row, entries, pending)[0] == "lapsed":
+        return ('<div class="strip s-blocked"><div class="body">'
+                f"<strong>⚠ NOT EXECUTED — STRANDED</strong> — {esc(_short(decided))} is held in "
+                "the ledger but is not in the approval store, so there was nothing to grant and "
+                "nothing ran. It was never decided; the queue lost it. The draft cannot be "
+                f'restored. <a href="/decision/{esc(decided)}">What is left of it ↗</a>'
+                "</div></div>")
+
     return ('<div class="strip s-neutral"><div class="body">'
             f"<strong>· ALREADY DECIDED</strong> — {esc(_short(decided))} is no longer awaiting a "
             f"decision. {link}</div></div>")
@@ -1084,8 +1186,54 @@ def _cleared_strip(entries: list[LedgerEntry], sweep: Sweep | None) -> str:
     )
 
 
+def _divergence_strip(recon: Reconciliation) -> str:
+    """The sentence the Desk owes the operator when the two stores disagree.
+
+    It sits ABOVE the hero count on purpose: the count is the answer to "what can
+    I decide?", and this is the answer to "is that count trustworthy?". They are
+    different questions and the second one has to be asked first.
+    """
+    if not recon.diverged:
+        return ""
+    parts: list[str] = []
+    if not recon.store_readable:
+        parts.append(
+            "<strong>⚠ THE APPROVAL STORE COULD NOT BE READ</strong> — the file exists and did "
+            "not parse. <strong>This is not an empty queue.</strong> No count on this page can be "
+            "trusted until it is readable, and no decision will be taken against it.")
+    if recon.stranded:
+        n = len(recon.stranded)
+        parts.append(
+            f"<strong>⚠ {n} HELD ACTION{'S ARE' if n != 1 else ' IS'} STRANDED</strong> — in the "
+            "ledger, absent from the approval store. They cannot be approved and they cannot run. "
+            "This is a divergence between the record and the queue, <strong>not a backlog</strong>: "
+            "the drafts lived only in the store, so nothing can restore them. "
+            '<a href="/ledger">Review the record ↗</a>')
+    if recon.orphaned:
+        n = len(recon.orphaned)
+        parts.append(
+            f"<strong>⚠ {n} QUEUE ENTR{'IES HAVE' if n != 1 else 'Y HAS'} NO HELD ROW</strong> — "
+            "approvable, but the record never authorized them. This one fails OPEN; the stranded "
+            "ones fail closed.")
+    if recon.dangling_grants:
+        n = len(recon.dangling_grants)
+        parts.append(
+            f"<strong>⚠ {n} GRANT{'S PERSIST' if n != 1 else ' PERSISTS'} WITH NOTHING "
+            "PENDING</strong> — a durable standing authorization. Single-use in name only until "
+            "it is investigated.")
+    bodies = "".join(f'<div class="strip s-blocked"><div class="body">{p}</div></div>'
+                     for p in parts)
+    return (f'<div class="band">{bodies}'
+            '<p class="meta">Detected by <code>governance.gate.reconcile</code>, which reads the '
+            "ledger and the approval store and compares them. It writes nothing. Full report: "
+            "<code>python -m freight_fleet.cli approvals reconcile</code></p></div>")
+
+
 def _decided_recently(entries: list[LedgerEntry]) -> str:
-    rows = [e for e in entries if e.outcome in {"approved", "rejected", "executed"}][-5:][::-1]
+    """The last five operator decisions. A hold retired as ABANDONED is one of
+    them — somebody decided a stranded row should be closed, and "nothing
+    happened" and "somebody decided nothing should happen" are different facts."""
+    rows = [e for e in entries if e.outcome in RESOLVING_OUTCOMES][-5:][::-1]
     if not rows:
         return ""
     items = "".join(
@@ -1104,10 +1252,15 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
     """The Desk. A huge waiting count and one sentence — the first frame of the
     video has to be legible on a phone held at arm's length."""
     entries = load_ledger()
+    recon = load_reconciliation(entries)
     pending = load_pending()
     holds = build_holds(entries, pending)
     sweep = latest_sweep(entries)
     outbox = outbox_count()
+    # The sweep's OWN stranded holds, not the fleet's — the brief makes a claim
+    # about one run and must not borrow another run's divergence to support it.
+    sweep_stranded = [st for st in recon.stranded
+                      if sweep is not None and st.session_id == sweep.session]
 
     flash = _flash(entries, pending, decided, why) if decided else ""
 
@@ -1122,13 +1275,35 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
             '<p class="mono">python -m freight_fleet.cli sweep</p></div>'
         )
     else:
-        waiting_label = "Decisions waiting" if holds else "Nothing waiting"
+        if holds:
+            waiting_label = "Decisions waiting"
+        elif recon.diverged:
+            # 0 is the true count of what you can act on. It is NOT the answer to
+            # "is everything fine?", and the label must not pretend otherwise.
+            waiting_label = "Actionable — but out of sync"
+        else:
+            waiting_label = "Nothing waiting"
         if sweep is None:
             sentence = ('<strong>No sweep has run yet.</strong> The ledger holds decisions from '
                         "operator sessions only.")
             quickstart = '<p class="mono">python -m freight_fleet.cli sweep</p>'
         elif holds:
             sentence = esc(sweep_sentence(sweep))
+            quickstart = ""
+        elif sweep_stranded:
+            # The sentence this replaces said "held nothing. Your desk is clear."
+            # while the same page's ledger showed five held rows. A brief that
+            # contradicts its own evidence is worse than no brief.
+            n = len(sweep_stranded)
+            sentence = (f"The last sweep ran {sweep.t0}–{sweep.t1} UTC on {sweep.date}"
+                        f"{sweep.age}. It held {sweep.nheld} action(s), and {n} of them "
+                        "cannot be found in the approval store. Your desk is not clear — the "
+                        "record and the queue disagree.")
+            quickstart = ""
+        elif sweep.nheld:
+            sentence = (f"The last sweep ran {sweep.t0}–{sweep.t1} UTC on {sweep.date}"
+                        f"{sweep.age}. It held {sweep.nheld} action(s), all of them since "
+                        "decided. Your desk is clear.")
             quickstart = ""
         else:
             sentence = (f"The last sweep ran {sweep.t0}–{sweep.t1} UTC on {sweep.date}{sweep.age} "
@@ -1160,13 +1335,15 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
         flash
         + "<h1>Operator desk</h1>"
         + '<p class="lede">The approval store is the authority for what is actionable; the ledger '
-          "is the authority for what happened.</p>"
+          "is the authority for what happened. This screen also checks that the two agree.</p>"
+        + _divergence_strip(recon)
         + brief + queue
         + _cleared_strip(entries, sweep)
         + _decided_recently(entries)
         + '<div class="band">' + derivations_block() + "</div>"
     )
-    return HTMLResponse(_shell("Operator desk", body, active="desk", pending=len(pending)))
+    return HTMLResponse(_shell("Operator desk", body, active="desk", pending=len(pending),
+                               stranded=len(recon.stranded)))
 
 
 # --- screen 2: the Decision --------------------------------------------------
@@ -1175,6 +1352,45 @@ def _not_found(what: str, detail: str) -> HTMLResponse:
     body = (f"<h1>404 — {esc(what)}</h1><p class=\"lede\">{detail}</p>"
             '<p><a href="/">← Back to the desk</a></p>')
     return HTMLResponse(_shell(f"404 — {what}", body, show_footer=False), status_code=404)
+
+
+def _recovery_block(entry: LedgerEntry, shipment: str, path: str) -> str:
+    """What a stranded hold can honestly offer. Two things, and neither is a draft.
+
+    There is no "restore" button here and there is no route that would build one.
+    The draft lived only in the approval store; `digest_args` kept its LENGTH, and
+    `action_fingerprint` hashes the digest — so a reconstruction padded to the
+    same length fingerprints IDENTICALLY to the original and the gate would let
+    it through as `approved`. The gate cannot be what refuses a fabricated
+    recovery, so this page refuses it structurally by offering no such path.
+
+    The console does not offer ABANDON as a button either. Its write boundary is
+    exactly two functions (`execute_approved`, `reject_approved`), that claim is
+    tested, and closing a stranded row is a rare, record-only operation with no
+    deadline. The command is printed instead of the boundary being widened.
+    """
+    chars = (entry.args_digest or {}).get("content_chars")
+    shape = f"{_num(chars)} characters" if isinstance(chars, int) else "an unrecorded length"
+    rerun = (f"python -m freight_fleet.cli chat --session shipment-{shipment} "
+             f'"cross-check shipments/{shipment}"') if shipment else (
+        "python -m freight_fleet.cli sweep")
+    return (
+        '<div class="card"><h2>This hold cannot be restored</h2>'
+        f"<p>The draft lived only in the approval store. The ledger recorded its shape — "
+        f"{esc(shape)} — not its body, and nothing else holds a copy: the sweep's session "
+        "history is not a second source, and a substitute of the same length would be "
+        "indistinguishable to the gate from the original. So there is no button here that puts "
+        "this back in the queue, and no code path that could.</p>"
+        "<p><strong>To act on this shipment, redo the work.</strong> A fresh check reads the same "
+        "canonical documents and produces a new draft, which gets its own hold and its own id:</p>"
+        f'<p class="mono">{esc(rerun)}</p>'
+        "<p><strong>To close this row in the record</strong> without executing anything — one "
+        "appended ledger row, nothing written to the workspace, now or ever:</p>"
+        f'<p class="mono">python -m freight_fleet.cli approvals abandon {esc(entry.entry_id)}</p>'
+        '<p class="meta">Both commands are the CLI, not this page. The console\'s only write path '
+        "is a gated replay through <code>before_tool_gate</code>, and retiring a hold the store "
+        "already lost is not one.</p></div>"
+    )
 
 
 def _exhibit(entry: LedgerEntry, entries: list[LedgerEntry], pending: dict[str, Any]) -> HTMLResponse:
@@ -1195,6 +1411,7 @@ def _exhibit(entry: LedgerEntry, entries: list[LedgerEntry], pending: dict[str, 
                 "executed — nothing was written. The ledger keeps the row because the ledger never "
                 "forgets. The word is LAPSED, not expired: there is no timer.</p>")
     path = str((entry.args_digest or {}).get("path", ""))
+    recovery = "" if status == "resolved" else _recovery_block(entry, shipment, path)
     body = (
         f'<div class="strip s-held {state.rail}"><div class="body">'
         f'<strong><span class="glyph">{state.glyph}</span> {banner}</strong><br>'
@@ -1208,10 +1425,12 @@ def _exhibit(entry: LedgerEntry, entries: list[LedgerEntry], pending: dict[str, 
         "<p>The draft is not available here: it lived in the approval store and was retired. The "
         f"ledger recorded its shape — {esc(str((entry.args_digest or {}).get('content_chars', '?')))} "
         "characters — not its body, because a 40 KB payload in an audit trail is noise.</p></div>"
-        f'<p><a href="/ledger#e-{esc(entry.entry_id)}">See this row in the record ↗</a> · '
+        + recovery
+        + f'<p><a href="/ledger#e-{esc(entry.entry_id)}">See this row in the record ↗</a> · '
         '<a href="/">← Back to the desk</a></p>'
     )
-    return HTMLResponse(_shell("Decision — exhibit", body, pending=len(pending)))
+    return HTMLResponse(_shell("Decision — exhibit", body,
+                                pending=len(pending), stranded=stranded_count(entries)))
 
 
 @app.get("/decision/{approval_id}", response_class=HTMLResponse)
@@ -1331,7 +1550,7 @@ def decision(approval_id: str) -> HTMLResponse:
         + contract + draft + evidence + actions
         + '<p style="margin-top:24px"><a href="/">← Back to the desk</a></p>'
     )
-    return HTMLResponse(_shell("Decision", body, pending=len(pending)))
+    return HTMLResponse(_shell("Decision", body, pending=len(pending), stranded=stranded_count(entries)))
 
 
 # --- the two writes ----------------------------------------------------------
@@ -1342,6 +1561,27 @@ def _forbidden() -> HTMLResponse:
             "No store was touched and no ledger row was written.</p>"
             '<p><a href="/">← Back to the desk</a></p>')
     return HTMLResponse(_shell("403 — read-only", body, show_footer=False), status_code=403)
+
+
+def _writable_store() -> FileApprovalStore | None:
+    """The store, for the two write handlers.
+
+    `None` means unreadable, and a decision is then REFUSED rather than taken
+    against a queue this process cannot see. `open_store` degrades to an empty
+    store only when the file is absent, which is a real empty queue.
+    """
+    return open_store(_approvals_path())
+
+
+def _unreadable_store() -> HTMLResponse:
+    body = ("<h1>The approval store could not be read</h1>"
+            '<p class="lede">The queue at <span class="mono">'
+            f'{esc(_approvals_path())}</span> exists but did not parse. This is not an empty '
+            "queue, and no decision will be taken against it. The ledger is unaffected — it is a "
+            "separate, append-only file.</p>"
+            '<p class="mono">python -m freight_fleet.cli approvals reconcile</p>'
+            '<p><a href="/ledger">← The record</a></p>')
+    return HTMLResponse(_shell("Store unreadable", body, show_footer=False), status_code=503)
 
 
 def _known(approval_id: str, pending: dict[str, Any], entries: list[LedgerEntry]) -> bool:
@@ -1357,13 +1597,16 @@ def approve(approval_id: str):
     `before_tool_gate` — the identical function `cli approvals grant` calls."""
     if _readonly():
         return _forbidden()
-    pending = load_pending()
+    store = _writable_store()
+    if store is None:
+        return _unreadable_store()
+    pending = store.pending()
     if not _known(approval_id, pending, load_ledger()):
         return _not_found("Not in evidence", "No held action carries this id.")
     result = execute_approved(
         approval_id,
         ledger=Ledger(_ledger_path()),
-        approvals=FileApprovalStore(_approvals_path()),
+        approvals=store,
         tool_fns=_TOOL_FNS,
         source=SOURCE,
     )
@@ -1376,13 +1619,16 @@ def reject(approval_id: str):
     """Retire a hold without running it. Nothing is written, ever."""
     if _readonly():
         return _forbidden()
-    pending = load_pending()
+    store = _writable_store()
+    if store is None:
+        return _unreadable_store()
+    pending = store.pending()
     if not _known(approval_id, pending, load_ledger()):
         return _not_found("Not in evidence", "No held action carries this id.")
     result = reject_approved(
         approval_id,
         ledger=Ledger(_ledger_path()),
-        approvals=FileApprovalStore(_approvals_path()),
+        approvals=store,
         source=SOURCE,
     )
     return RedirectResponse(f"/?decided={quote(approval_id)}&why={quote(result.status)}",
@@ -1451,11 +1697,13 @@ def _ledger_row(entry: LedgerEntry, entries: list[LedgerEntry], pending: dict[st
     else:
         extra = ""
     path = str((entry.args_digest or {}).get("path", (entry.args_digest or {}).get("prefix", "")))
-    lapsed_note = ""
+    stranded_note = ""
     if extra == "LAPSED":
-        lapsed_note = ('<div class="meta">Held in the ledger; no longer in the approval store. '
-                       "Never approved, never executed — nothing was written. The ledger keeps the "
-                       "row because the ledger never forgets.</div>")
+        stranded_note = ('<div class="meta">Held in the ledger; not in the approval store. Never '
+                         "approved, never executed — nothing was written, and nothing can write "
+                         "it now: the draft lived only in the store and the ledger recorded its "
+                         "length, not its body. The ledger keeps the row because the ledger never "
+                         "forgets.</div>")
     return (
         f'<div class="lrow {state.rail} {tint}" id="e-{esc(entry.entry_id)}" '
         f'style="color:var(--{state.tone})"><div class="rowtop">'
@@ -1467,7 +1715,7 @@ def _ledger_row(entry: LedgerEntry, entries: list[LedgerEntry], pending: dict[st
         f"{_chain(entry, entries, pending)}</div>"
         + (f'<div class="qpath">{esc(path)}</div>' if path else "")
         + (f'<div class="meta">{esc(entry.detail)}</div>' if entry.detail else "")
-        + lapsed_note
+        + stranded_note
         + "</div>"
     )
 
@@ -1577,7 +1825,8 @@ def record() -> HTMLResponse:
                 f'<p class="lede"><span class="mono">{esc(_ledger_path())}</span> does not exist '
                 "yet. The fleet writes it on its first tool call.</p>"
                 '<p class="mono">python -m freight_fleet.cli sweep</p>')
-        return HTMLResponse(_shell("The record", body, active="ledger", pending=len(pending)))
+        return HTMLResponse(_shell("The record", body, active="ledger",
+                                    pending=len(pending), stranded=stranded_count(entries)))
 
     order: list[str] = []
     for e in entries:
@@ -1611,7 +1860,8 @@ def record() -> HTMLResponse:
         + "".join(bands)
         + '<div class="band">' + derivations_block() + "</div>"
     )
-    return HTMLResponse(_shell("The record", body, active="ledger", pending=len(pending)))
+    return HTMLResponse(_shell("The record", body, active="ledger",
+                                pending=len(pending), stranded=stranded_count(entries)))
 
 
 @app.get("/ledger.jsonl")
@@ -1697,18 +1947,63 @@ def fleet() -> HTMLResponse:
         "here, by design</strong> — a reviewable diff is a better audit surface than a settings "
         "screen. <code>src/freight_fleet/governance/policy.py</code></p></div>"
     )
-    return HTMLResponse(_shell("The fleet", body, active="fleet", pending=len(pending)))
+    return HTMLResponse(_shell("The fleet", body, active="fleet",
+                                pending=len(pending), stranded=stranded_count()))
 
 
 # --- screen 5: the Scoreboard ------------------------------------------------
 
+def collapse_attempts(record_: dict[str, Any]) -> list[dict[str, Any]]:
+    """One row per TASK, however many attempts the record holds.
+
+    `--repeat N` writes N rows per task, and rendering them raw turns 7 tasks
+    into 21 near-identical lines under a `21 / 21` headline that no longer means
+    what `7 / 7` meant. Worse, reading only the first row of each id — which is
+    what this screen used to do for the clean control — silently shows attempt 1
+    and hides a failure in attempt 3. That is a cherry-pick compiled into the
+    demo surface, not a reporting choice anybody made.
+
+    So a task passes here only when EVERY attempt passed. Reproducibility is the
+    claim `--repeat` exists to support; two runs out of three is a failure of
+    that claim, and it must not round up. The rule can only ever lower a number.
+    """
+    order: list[str] = []
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for r in record_.get("results") or []:
+        rid = str(r.get("id", "?"))
+        if rid not in grouped:
+            grouped[rid] = []
+            order.append(rid)
+        grouped[rid].append(r)
+
+    rows: list[dict[str, Any]] = []
+    for rid in order:
+        attempts = grouped[rid]
+        gradable = [a for a in attempts if "passed" in a]
+        row: dict[str, Any] = {
+            "id": rid,
+            "attempts": len(attempts),
+            "n_passed": sum(1 for a in gradable if a.get("passed")),
+            "n_gradable": len(gradable),
+            # The worst attempt represents the task: the details and the answer
+            # shown are the ones a reader most needs to see.
+            "worst": min(gradable, key=lambda a: float(a.get("score", 0)), default=attempts[0]),
+        }
+        if gradable:
+            row["passed"] = all(a.get("passed") for a in gradable)
+            row["score"] = min(float(a.get("score", 0)) for a in gradable)
+        rows.append(row)
+    return rows
+
+
 def _run_score(record_: dict[str, Any]) -> tuple[int, int]:
-    """(passed, gradable). A result with no `passed` key is manual tier and does
-    not enter either number — a screen showing 9/9 would be the one dishonest
-    pixel in the entry."""
-    results = record_.get("results") or []
-    gradable = [r for r in results if "passed" in r]
-    return sum(1 for r in gradable if r.get("passed")), len(gradable)
+    """(passed, gradable) counted in TASKS, not attempts, so a `--repeat 3` record
+    and a single run are the same fraction and the history bar stays comparable.
+
+    A result with no `passed` key is manual tier and does not enter either number
+    — a screen showing 9/9 would be the one dishonest pixel in the entry."""
+    rows = [r for r in collapse_attempts(record_) if "passed" in r]
+    return sum(1 for r in rows if r["passed"]), len(rows)
 
 
 @app.get("/evidence", response_class=HTMLResponse)
@@ -1731,20 +2026,27 @@ def evidence() -> HTMLResponse:
             "differently in the demo than in the deploy.</p></div>"
         )
         return HTMLResponse(_shell("The scoreboard", body, active="evidence",
-                                   pending=len(pending)))
+                                   pending=len(pending), stranded=stranded_count()))
 
     passed, gradable = _run_score(chosen)
-    results = chosen.get("results") or []
-    clean = next((r for r in results if r.get("id") == "g2_clean_control"), None)
+    task_rows = collapse_attempts(chosen)
+    attempts = max((r["attempts"] for r in task_rows), default=1)
+    clean = next((r for r in task_rows if r["id"] == "g2_clean_control"), None)
 
     clean_block = ""
     if clean is not None:
         verdict = "PASS" if clean.get("passed") else "FAIL"
+        # Named here rather than inlined: this card is the writeup's centrepiece
+        # claim, and a reader must be able to see how many attempts stand behind
+        # the word PASS without opening the record.
+        clean_tally = (f' ({clean["n_passed"]}/{clean["n_gradable"]} attempts)'
+                       if clean["n_gradable"] > 1 else "")
         clean_block = (
             '<div class="card" style="border:3px double var(--line);margin:24px 0">'
             f'<div class="label" style="color:var(--ink-3)">The number to look at first</div>'
             f'<p style="margin-top:12px"><span class="mono">g2_clean_control</span> — '
-            f'<strong>{esc(verdict)}</strong> — {esc(clean.get("details", ""))}</p>'
+            f'<strong>{esc(verdict)}</strong> — {esc(clean["worst"].get("details", ""))}'
+            f'{clean_tally}</p>'
             "<p>A missed discrepancy costs a correction. A fabricated discrepancy costs trust, and "
             "an operator who catches the agent inventing a problem in a clean document set stops "
             "believing all of its output, including the true findings. So discrepant shipments are "
@@ -1752,13 +2054,16 @@ def evidence() -> HTMLResponse:
         )
 
     rows: list[str] = []
-    for r in results:
+    for r in task_rows:
         rid = str(r.get("id", "?"))
         if "passed" in r:
             state = "executed" if r.get("passed") else "blocked"
             word = "PASS" if r.get("passed") else "FAIL"
             mark = (f'<span class="pill fill p-{state}">{word}</span>')
-            note = esc(r.get("details", ""))
+            note = esc(r["worst"].get("details", ""))
+            if r["n_gradable"] > 1:
+                note = (f'<span class="mono">{r["n_passed"]}/{r["n_gradable"]} attempts</span> — '
+                        + note)
             score = f'{float(r.get("score", 0)):.2f}'
             style = ""
         else:
@@ -1767,7 +2072,7 @@ def evidence() -> HTMLResponse:
             note = ("reviewed by a human, not by a regex — a weaker claim, labelled as such")
             score = "—"
             style = ' style="border-style:dotted"'
-        final = r.get("final_text") or ""
+        final = r["worst"].get("final_text") or ""
         detail = (f'<details class="raw"{style}><summary>{esc(rid)} — read the answer</summary>'
                   f'<div class="draft" style="max-height:none;-webkit-mask-image:none;'
                   f'mask-image:none">{md_lite(final)}</div></details>' if final else "")
@@ -1788,7 +2093,12 @@ def evidence() -> HTMLResponse:
         '<p class="label" style="color:var(--ink-3)">Most complete run</p>'
         '<p class="lede">The answer keys were written before the agents existed. No model sits in '
         "the grading path. The run shown is the newest with at least six results — not the newest "
-        "file, which may be a two-task hero-tier re-run.</p></div>"
+        "file, which may be a two-task hero-tier re-run.</p>"
+        + (f'<p class="lede">Every task was run <span class="mono">{attempts}</span> times. A task '
+           "counts as passed here only if <em>every</em> attempt passed — the fraction is tasks, "
+           "not attempts, so it means the same thing it did before the runs were repeated. The "
+           "per-attempt tally is on each row below.</p>" if attempts > 1 else "")
+        + "</div>"
         + clean_block
         + '<div class="band"><h2>Every task in the run</h2><div class="scroll"><table><thead><tr>'
         "<th>Task</th><th>Verdict</th><th>Score</th><th>Details</th></tr></thead>"
@@ -1798,7 +2108,8 @@ def evidence() -> HTMLResponse:
         "when the governance task <span class=\"mono\">g9</span> became mechanically gradable.</p>"
         "</div>"
     )
-    return HTMLResponse(_shell("The scoreboard", body, active="evidence", pending=len(pending)))
+    return HTMLResponse(_shell("The scoreboard", body, active="evidence",
+                                pending=len(pending), stranded=stranded_count()))
 
 
 # --- screen 6: a source document ---------------------------------------------
@@ -1875,7 +2186,8 @@ def doc(path: str = "") -> HTMLResponse:
                      f'({esc(result.get("status", "unknown"))}).</p></div>')
         body = (f"<h1>{esc(path)}</h1><p class=\"meta\">{provenance}</p>{panel}"
                 '<p><a href="/">← Back to the desk</a></p>')
-        return HTMLResponse(_shell(Path(path).name, body, pending=len(pending)))
+        return HTMLResponse(_shell(Path(path).name, body,
+                                    pending=len(pending), stranded=stranded_count(entries)))
 
     text = str(result.get("content", ""))
     suffix = Path(path).suffix
@@ -1895,4 +2207,4 @@ def doc(path: str = "") -> HTMLResponse:
         f'<div><pre>{esc(text)}</pre></div></details>'
         '<p style="margin-top:24px"><a href="/">← Back to the desk</a></p>'
     )
-    return HTMLResponse(_shell(Path(path).name, body, pending=len(pending)))
+    return HTMLResponse(_shell(Path(path).name, body, pending=len(pending), stranded=stranded_count(entries)))

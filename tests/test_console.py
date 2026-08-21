@@ -336,3 +336,78 @@ def test_every_page_is_well_formed_html(world, path):
     checker.feed(world.client.get(path).text)
     assert checker.errors == []
     assert checker.stack == []
+
+
+# --- a repeated run must not be reported as a better run ----------------------
+#
+# `--repeat N` writes N rows per task. Rendered raw, that turned 7 tasks into a
+# `21 / 21` headline while README and the writeup both said 7/7, and the clean
+# control card — the screen's own "number to look at first" — read `results[0]`
+# and so showed attempt 1 with no hint the other attempts existed.
+
+
+def _repeat_record(*, failing_attempt: int | None = None, repeat: int = 3) -> dict:
+    """A record shaped exactly as `run_eval.py --repeat` writes one."""
+    results = []
+    for task in ("g1_hero_crosscheck", "g2_clean_control", "g3_container_refs",
+                 "g4_quote_vs_invoice", "g5_air_dangerous_goods", "g6_missing_document"):
+        for attempt in range(1, repeat + 1):
+            bad = failing_attempt == attempt and task == "g2_clean_control"
+            results.append({
+                "id": task, "attempt": attempt,
+                "passed": not bad, "score": 0.0 if bad else 1.0,
+                "details": "invented a discrepancy" if bad else "clean control correct",
+                "final_text": f"answer for {task} attempt {attempt}",
+            })
+    return {"model": "gemini-3.7-flash", "ts": "20260821T205755Z",
+            "repeat": repeat, "results": results}
+
+
+def _write_run(world, record: dict, name: str = "20260821T205755Z.json") -> None:
+    import os
+    (pytest.importorskip("pathlib").Path(os.environ["FREIGHT_EVAL_RUNS"]) / name).write_text(
+        json.dumps(record), encoding="utf-8")
+
+
+def test_the_scoreboard_counts_tasks_not_attempts(world):
+    """Three attempts at seven tasks is still seven tasks. A headline that reads
+    21/21 against a writeup that says 7/7 makes a reader check which one lied."""
+    _write_run(world, _repeat_record())
+
+    body = world.client.get("/evidence").text
+    assert ">6 / 6<" in body, "the headline must count tasks"
+    assert "18 / 18" not in body, "attempts must not become the denominator"
+
+
+def test_one_failing_attempt_fails_the_task(world):
+    """The cherry-pick, sealed. Attempt 3 of the clean control invents a
+    discrepancy; the screen must not report the task as passed because attempt 1
+    happened to be first in the list."""
+    _write_run(world, _repeat_record(failing_attempt=3))
+
+    body = world.client.get("/evidence").text
+    assert ">5 / 6<" in body, "a task that failed one of three attempts counted as passed"
+    assert "2/3 attempts" in body, "the per-attempt tally must be on the row"
+
+
+def test_the_clean_control_card_shows_the_worst_attempt(world):
+    """`results[0]` is attempt 1. The card is the writeup's centrepiece claim, so
+    reading the first row and calling it the verdict is the whole defect."""
+    _write_run(world, _repeat_record(failing_attempt=3))
+
+    body = world.client.get("/evidence").text
+    card = body[body.index("The number to look at first"):]
+    card = card[:card.index("Every task in the run")]
+    assert "FAIL" in card and "PASS" not in card
+    assert "invented a discrepancy" in card
+
+
+def test_a_single_run_is_unchanged_by_the_collapse(world):
+    """The repeat-aware path must not alter how an ordinary run reads — the
+    history bar compares them side by side."""
+    _write_run(world, _repeat_record(repeat=1))
+
+    body = world.client.get("/evidence").text
+    assert ">6 / 6<" in body
+    assert "attempts</span>" not in body, "no attempt tally when there is one attempt"
+    assert "Every task was run" not in body

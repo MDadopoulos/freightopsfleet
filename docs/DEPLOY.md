@@ -165,6 +165,7 @@ export URL=$(gcloud run services describe "$SERVICE" --format='value(status.url)
 
 # the console is up (no credentials involved)
 curl -s "$URL/healthz"          # expect: {"ok":true}
+curl -s "$URL/reconcile.json"   # expect: {"diverged":false,...}
 curl -s "$URL/" | head -5       # the Desk
 ```
 
@@ -223,15 +224,21 @@ gcloud run jobs deploy "$JOB" \
   --args "-m,freight_fleet.cli,sweep" \
   --memory 1Gi \
   --task-timeout 1800 \
-  --max-retries 1 \
+  --max-retries 0 \
   --region "$REGION"
 ```
 
 - **`--command` / `--args`** override the image's `CMD`, so the same image runs
   the CLI instead of the API server.
 - **`--task-timeout 1800`** — six shipments at ~60s each, with headroom.
-- **`--max-retries 1`** — a retried sweep re-drafts notices that are already
-  held. One retry is a network hiccup; more is duplicate work for the operator.
+- **`--max-retries 0`** — the sweep is **not idempotent**: every run that reaches
+  a shipment drafts a notice and holds it, so a second run holds a second copy of
+  the same draft under a second approval id. It also now exits non-zero when it
+  *skips* a shipment rather than only when it dies — which is the honest signal,
+  but it means Cloud Run would retry a run that already held five of six drafts
+  and hand the operator five duplicates. Retrying is the wrong response to a
+  partial sweep. A failed execution is visible in the logs; re-run it by hand
+  after reading them, once you know which shipments actually got through.
 
 Run it once by hand, on camera if you like:
 
@@ -242,10 +249,17 @@ gcloud run jobs executions logs read \
       --limit=1 --format='value(name)')" --region "$REGION"
 ```
 
-The closing line of the logs is the one that matters:
+Two lines of the logs matter. The tally:
 
 ```
   5 draft(s) held for approval; nothing sent, nothing written.
+```
+
+And, if the run did not reach every shipment, the line naming what it missed —
+a sweep that silently skipped work is not a successful sweep:
+
+```
+  !! 1 of 6 shipment(s) were NOT checked: shp-004-air-dg
 ```
 
 ---

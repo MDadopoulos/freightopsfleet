@@ -6,6 +6,8 @@
     python -m freight_fleet.cli ledger [--session SID]
     python -m freight_fleet.cli approvals list
     python -m freight_fleet.cli approvals grant <approval_id>
+    python -m freight_fleet.cli approvals reconcile
+    python -m freight_fleet.cli approvals abandon <approval_id> [--note "..."]
     python -m freight_fleet.cli console [--port 8080]
 
 `chat` runs ONE turn against the coordinator on a DURABLE session
@@ -14,6 +16,19 @@
 it is simply how the command works. The same session id in a later invocation
 continues the same conversation with its history. Vertex AI sessions are the
 deploy-time swap; the session id and app name do not change.
+
+`sweep` is durable too, and on a different axis: its LEDGER session id is the
+run (`sweep-<date>`), its ADK conversation id is the SUBJECT
+(`shipment-<dir>`). The first changes every morning, the second must not — a
+scheduled sweep that rebuilt its sessions each run would be the half of the
+entry that forgets. See `cmd_sweep`.
+
+`approvals reconcile` compares the two: the ledger is the authority for what
+happened, the approval store for what is actionable, and they are two files
+written by two unsynchronised writes. It exits 1 when they disagree, so it works
+as a healthcheck. `approvals list` reports the same disagreement inline, because
+"no actions awaiting approval" printed while the ledger holds six unresolved
+rows is a false statement on the operator's decision surface.
 
 `catalog` and `ledger` work today with no credentials — they read code-owned data
 and the JSONL ledger. `approvals` shares the durable `FileApprovalStore` with the
@@ -91,21 +106,56 @@ def cmd_chat(args: argparse.Namespace) -> int:
     return asyncio.run(turn())
 
 
+def sweep_session_id(shipment: str) -> str:
+    """The ADK conversation id for one shipment. Module-level so it is testable,
+    and so the fact that it takes NO date is visible from the signature: a
+    parameter it does not have is a way it cannot break."""
+    return f"shipment-{shipment}"
+
+
 def cmd_sweep(args: argparse.Namespace) -> int:
     """The unattended morning run (BUILD-PLAN step 6b): cross-check every open
     shipment, hold anything consequential, touch nothing. Cloud Scheduler at
     deploy time simply cron-invokes this command - the honesty of the async
-    story is that nobody needs to be watching when it runs."""
+    story is that nobody needs to be watching when it runs.
+
+    TWO SESSION IDS, TWO DIFFERENT QUESTIONS. They are not the same axis and
+    collapsing them is what broke continuity here:
+
+    * The LEDGER session id is `sweep-<date>` — the identity of THIS RUN. It
+      answers "what did the sweep of 21 Aug decide?", and the console groups the
+      record by it. It must change every morning.
+    * The ADK conversation id is `shipment-<dir>` — the identity of the SUBJECT.
+      It answers "what does the fleet already know about this shipment?", and it
+      must NOT change every morning, or the unattended half of the entry forgets
+      everything overnight while the attended half (`chat`) remembers.
+
+    Before this, the sweep built an `InMemorySessionService` per shipment per
+    run: a sweep that ran every morning for three weeks started from nothing
+    twenty-one times. Now it uses `DatabaseSessionService` over the same SQLite
+    file `chat` uses, so consecutive sweeps of one shipment continue ONE
+    conversation, and killing the process between mornings changes nothing.
+
+    Why the shipment DIRECTORY NAME is the identity: it is the workspace's own
+    name for the shipment, it is already the unit this loop iterates and the unit
+    D1 derives on the console, and it is stable across runs without inventing a
+    key. Per shipment rather than one session for the whole sweep, because a
+    single shared conversation would carry one shipment's documents and findings
+    into the next shipment's context — that is a data-scope leak, not merely
+    untidiness. If a shipment folder is renamed its history legitimately starts
+    over: a renamed folder is a different subject as far as this fleet can tell,
+    and mapping it onto the old history would be inventing continuity.
+    """
     import asyncio
     from pathlib import Path
 
     from google.adk.runners import Runner
-    from google.adk.sessions import InMemorySessionService
+    from google.adk.sessions import DatabaseSessionService
     from google.genai import types
 
     from .agents.fleet import _specialist
     from .catalog.registry import get_card
-    from .governance.gate import make_before_tool_gate
+    from .governance.gate import make_before_tool_gate, open_store, reconcile
 
     workspace = Path(os.environ.get("FREIGHT_WORKSPACE_ROOT", "./workspace"))
     shipments = sorted(p.name for p in (workspace / "shipments").iterdir() if p.is_dir())
@@ -113,24 +163,57 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         print("  no shipments in the workspace - seed it first")
         return 1
 
-    session_id = f"sweep-{args.date}" if args.date else "sweep"
+    # Same URL requirement as `chat`: DatabaseSessionService needs the async
+    # driver, and SQLite will not create a missing parent directory for itself.
+    if ":///" in _SESSIONS_DB and _SESSIONS_DB.startswith("sqlite"):
+        Path(_SESSIONS_DB.split(":///", 1)[1]).parent.mkdir(parents=True, exist_ok=True)
+
+    run_id = f"sweep-{args.date}" if args.date else "sweep"
     ledger = Ledger(_LEDGER_PATH)
     store = _approval_store()
-    gate = make_before_tool_gate(ledger, store, session_id=session_id)
+    gate = make_before_tool_gate(ledger, store, session_id=run_id)
     card = get_card("cross_check")
 
-    async def one(shipment: str) -> str:
+    async def one(session_service, shipment: str) -> tuple[str, int]:
         agent = _specialist(card, args.model, gate)
-        session_service = InMemorySessionService()
-        sid = f"{session_id}-{shipment}"
-        await session_service.create_session(app_name=_APP, user_id=_USER, session_id=sid)
-        runner = Runner(agent=agent, app_name=_APP, session_service=session_service)
+        sid = sweep_session_id(shipment)
+        session = await session_service.get_session(
+            app_name=_APP, user_id=_USER, session_id=sid
+        )
+        if session is None:
+            await session_service.create_session(
+                app_name=_APP, user_id=_USER, session_id=sid
+            )
+            prior = 0
+        else:
+            prior = len(session.events)
+
+        # The prompt states only what the session service can prove: how many
+        # events this conversation already carries. It never asserts a number of
+        # previous sweeps or a span of weeks - a first run on a fresh database
+        # must not be told it has history it does not have.
+        if prior:
+            history = (
+                f"You have checked this shipment before: this conversation already carries "
+                f"{prior} event(s), and your earlier findings are above in it. Re-check the "
+                "documents as they stand now. Say plainly whether what you find MATCHES your "
+                "last check or DIFFERS from it, and name what changed if anything did. Do not "
+                "repeat the full report when nothing has moved."
+            )
+        else:
+            history = (
+                "This is the first check of this shipment on this conversation, so there is "
+                "nothing to compare against yet. State your findings plainly enough that the "
+                "next sweep can compare against them."
+            )
         prompt = (
-            f"Unattended morning sweep. Cross-check shipments/{shipment}. "
+            f"Unattended morning sweep ({run_id}). Cross-check shipments/{shipment}. "
+            f"{history} "
             "If there are discrepancies, draft the notice and save it under outbox/ "
             "(it will be held for approval). Finish with one line: "
             f"'{shipment}: N discrepancies'."
         )
+        runner = Runner(agent=agent, app_name=_APP, session_service=session_service)
         final = ""
         async for event in runner.run_async(
             user_id=_USER, session_id=sid,
@@ -138,21 +221,51 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         ):
             if event.is_final_response() and event.content and event.content.parts:
                 final = "".join(p.text or "" for p in event.content.parts)
-        return final
+        return final, prior
 
-    async def run_all() -> None:
-        print(f"\n  SWEEP {session_id} - {len(shipments)} open shipment(s)\n")
+    async def run_all() -> list[str]:
+        session_service = DatabaseSessionService(db_url=_SESSIONS_DB)
+        print(f"\n  SWEEP {run_id} - {len(shipments)} open shipment(s)")
+        print(f"  conversations are durable: {_SESSIONS_DB}\n")
+        failed: list[str] = []
         for shipment in shipments:
-            final = await one(shipment)
+            # One shipment's transient model error must not end the sweep. This
+            # is the UNATTENDED path -- nobody is watching, and the tail of this
+            # function is where the operator's desk gets summarized and where the
+            # stranding self-check runs. Letting a 502 propagate skipped every
+            # remaining shipment AND both of those, so a morning that held two
+            # drafts reported a traceback instead of a queue. Observed live: a
+            # `502 policy context unavailable` on shipment 4 of 6.
+            try:
+                final, prior = await one(session_service, shipment)
+            except Exception as exc:  # noqa: BLE001 - one bad shipment must not eat the run
+                failed.append(shipment)
+                print(f"  {shipment:24} [FAILED] {type(exc).__name__}: {str(exc)[:80]}")
+                continue
             last = next((ln.strip() for ln in reversed(final.splitlines()) if ln.strip()), "")
-            print(f"  {shipment:24} {last[:120]}")
+            cont = f"resumed, {prior} prior events" if prior else "new conversation"
+            print(f"  {shipment:24} [{cont}] {last[:100]}")
+        if failed:
+            print(f"\n  !! {len(failed)} of {len(shipments)} shipment(s) were NOT checked: "
+                  f"{', '.join(failed)}")
+            print("     Their conversations are unchanged; the next sweep resumes them.")
         pending = store.pending()
         print(f"\n  {len(pending)} draft(s) held for approval; nothing sent, nothing written.")
         for aid, payload in pending.items():
             print(f"    {aid}  {payload.get('args', {}).get('path', '?')}")
+        # The sweep is exactly where a hold gets stranded, so it checks its own
+        # work before it exits rather than leaving the operator to find out from
+        # an empty queue tomorrow morning.
+        recon = reconcile(Ledger(_LEDGER_PATH), open_store(_APPROVALS_PATH))
+        if recon.diverged:
+            print(f"\n  WARNING: the record and the approval store disagree "
+                  f"({len(recon.stranded)} stranded, {len(recon.orphaned)} orphaned). "
+                  f"Run: python -m freight_fleet.cli approvals reconcile")
+        return failed
 
-    asyncio.run(run_all())
-    return 0
+    # A sweep that silently skipped shipments is not a successful sweep: the
+    # scheduler invoking this must be able to tell the difference.
+    return 1 if asyncio.run(run_all()) else 0
 
 
 def cmd_catalog(_args: argparse.Namespace) -> int:
@@ -170,6 +283,8 @@ def cmd_catalog(_args: argparse.Namespace) -> int:
 
 
 def cmd_ledger(args: argparse.Namespace) -> int:
+    from .governance.gate import RESOLVING_OUTCOMES
+
     entries = list(Ledger(_LEDGER_PATH).read())
     if args.session:
         entries = [e for e in entries if e.session_id == args.session]
@@ -181,9 +296,10 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     for e in entries:
         print(f"  {e.ts:20} {e.agent[:18]:18} {e.tool[:12]:12} "
               f"{e.verdict:8} {e.outcome:10} {e.detail[:40]}")
-    # A hold is resolved once a later row carries its id as approved/rejected —
-    # otherwise an approved action keeps showing as pending forever.
-    resolved = {e.approval_id for e in entries if e.outcome in {"approved", "rejected"}}
+    # A hold is resolved once a later row carries its id as one of
+    # RESOLVING_OUTCOMES — imported, not restated, because this rule and the
+    # console's copy of it had already drifted apart.
+    resolved = {e.approval_id for e in entries if e.outcome in RESOLVING_OUTCOMES}
     held = [e for e in entries if e.outcome == "held" and e.entry_id not in resolved]
     if held:
         print(f"\n  {len(held)} action(s) awaiting approval:")
@@ -193,39 +309,133 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stranded_block(recon, limit: int = 5) -> str:
+    """The warning `approvals list` must print instead of a clear desk.
+
+    Rendered from the LEDGER row only. There is no draft body here and no way to
+    ask for one: the store held it, `digest_args` kept its length, and a
+    placeholder of the same length fingerprints identically to the original — so
+    saying "NOT RECOVERABLE" out loud is the only honest line available.
+    """
+    if not recon.diverged:
+        return ""
+    out: list[str] = [""]
+    if not recon.store_readable:
+        out.append("  !! THE APPROVAL STORE COULD NOT BE READ.")
+        out.append("     This is not an empty queue. Nothing below can be approved until the")
+        out.append(f"     file at {_APPROVALS_PATH} is readable again.")
+    if recon.stranded:
+        out.append(f"  !! {len(recon.stranded)} held action(s) are in the LEDGER but NOT in the")
+        out.append("     approval store. They cannot be approved and nothing will run them.")
+        out.append("")
+        for st in recon.stranded[:limit]:
+            out.append(f"     {st.approval_id}  {st.tool}  {st.path or '?'}")
+            out.append(f"         held {st.ts} by {st.agent} in {st.session_id}")
+            chars = "unknown" if st.content_chars is None else f"{st.content_chars} characters"
+            out.append(f"         draft body NOT RECOVERABLE — {chars} recorded, "
+                       "the content was never in the ledger")
+        if len(recon.stranded) > limit:
+            out.append(f"     ... {len(recon.stranded) - limit} more")
+    if recon.orphaned:
+        out.append(f"  !! {len(recon.orphaned)} store entr(ies) have NO held row in the ledger.")
+        out.append("     These fail OPEN: approvable, but the record never authorized them.")
+        for aid in recon.orphaned[:limit]:
+            out.append(f"     {aid}")
+    if recon.dangling_grants:
+        out.append(f"  !! {len(recon.dangling_grants)} grant(s) persist with nothing pending —")
+        out.append("     a durable standing authorization. Investigate before granting anything.")
+        for aid in recon.dangling_grants[:limit]:
+            out.append(f"     {aid}")
+    out.append("")
+    out.append("  python -m freight_fleet.cli approvals reconcile   # the full report")
+    out.append("")
+    return "\n".join(out)
+
+
 def cmd_approvals(args: argparse.Namespace) -> int:
-    """List, grant or reject. Grant and reject are thin printers over
-    `governance.gate` — the replay lives at the seam, not in the front door, so
-    the console cannot drift from the CLI about what approving means."""
+    """List, reconcile, grant, reject or abandon. Every verb that changes
+    anything is a thin printer over `governance.gate` — the replay lives at the
+    seam, not in the front door, so the console cannot drift from the CLI about
+    what approving means."""
     from .agents.fleet import _TOOL_FNS
-    from .governance.gate import execute_approved, reject_approved
+    from .governance.gate import (
+        abandon_stranded,
+        execute_approved,
+        open_store,
+        reconcile,
+        reject_approved,
+    )
 
-    store = _approval_store()
+    store = open_store(_APPROVALS_PATH)
 
-    if args.action == "list":
-        pending = store.pending()
-        if not pending:
-            print("\n  no actions awaiting approval\n")
-            return 0
-        print(f"\n  {len(pending)} action(s) awaiting approval\n")
-        for aid, payload in pending.items():
-            print(f"  {aid}")
-            print(f"    agent {payload.get('agent')}  tool {payload.get('tool')}")
-            args_ = payload.get("args") or {}
-            print(f"    path  {args_.get('path', '?')}")
-            if "content" in args_:
-                preview = str(args_["content"])[:400].rstrip()
-                print("    --- draft ---")
-                for line in preview.splitlines():
-                    print(f"    | {line}")
-                print("    --- end ---")
-        print()
+    if args.action in {"list", "reconcile"}:
+        recon = reconcile(Ledger(_LEDGER_PATH), store)
+        pending = store.pending() if store is not None else {}
+
+        if args.action == "reconcile":
+            print("\n  RECONCILE — the record against the queue\n")
+            print(f"    ledger    {_LEDGER_PATH}")
+            print(f"    store     {_APPROVALS_PATH}"
+                  f"{'' if recon.store_readable else '   (UNREADABLE)'}")
+            print(f"\n    {len(recon.awaiting)} awaiting · {len(recon.stranded)} stranded · "
+                  f"{len(recon.orphaned)} orphaned · "
+                  f"{len(recon.dangling_grants)} dangling grant(s)")
+            if not recon.diverged:
+                print("\n  The record and the queue agree.\n")
+                return 0
+            print(_stranded_block(recon, limit=1000))
+            # Exit 1 so this doubles as a healthcheck and a CI assertion.
+            return 1
+
+        if store is None:
+            # "no actions awaiting approval" would be a claim about a queue this
+            # process could not read. Say nothing about the queue at all.
+            print("\n  the approval store could not be read")
+        elif not pending:
+            print("\n  no actions awaiting approval")
+        else:
+            print(f"\n  {len(pending)} action(s) awaiting approval\n")
+            for aid, payload in pending.items():
+                print(f"  {aid}")
+                print(f"    agent {payload.get('agent')}  tool {payload.get('tool')}")
+                args_ = payload.get("args") or {}
+                print(f"    path  {args_.get('path', '?')}")
+                if "content" in args_:
+                    preview = str(args_["content"])[:400].rstrip()
+                    print("    --- draft ---")
+                    for line in preview.splitlines():
+                        print(f"    | {line}")
+                    print("    --- end ---")
+        # An empty queue is only good news if the record agrees with it.
+        print(_stranded_block(recon) or "")
         return 0
 
     if not args.approval_id:
         print("  approval id required")
         return 1
     aid = args.approval_id
+
+    if store is None:
+        print(f"  the approval store at {_APPROVALS_PATH} could not be read; refusing to "
+              "decide anything against a queue this process cannot see")
+        return 1
+
+    if args.action == "abandon":
+        res = abandon_stranded(aid, ledger=Ledger(_LEDGER_PATH), approvals=store,
+                               source="approval-cli", note=args.note)
+        if res.status == "not_held":
+            print(f"  no held row in the ledger carries id {aid}")
+            return 1
+        if res.status == "already_resolved":
+            print(f"  {aid} is already resolved in the record; nothing to abandon")
+            return 1
+        if res.status == "still_pending":
+            print(f"  {aid} is still in the approval store — reject it instead:")
+            print(f"    python -m freight_fleet.cli approvals reject {aid}")
+            return 1
+        print(f"  abandoned {aid} ({res.tool} {res.path}) — {res.detail}")
+        print("  one ledger row was appended. Nothing was written to the workspace.")
+        return 0
 
     if args.action == "reject":
         res = reject_approved(aid, ledger=Ledger(_LEDGER_PATH), approvals=store,
@@ -283,9 +493,10 @@ def main() -> int:
     p_ledger.add_argument("--session")
     p_ledger.set_defaults(fn=cmd_ledger)
 
-    p_appr = sub.add_parser("approvals", help="list or grant pending approvals")
-    p_appr.add_argument("action", choices=["list", "grant", "reject"])
+    p_appr = sub.add_parser("approvals", help="list, reconcile, grant, reject or abandon")
+    p_appr.add_argument("action", choices=["list", "reconcile", "grant", "reject", "abandon"])
     p_appr.add_argument("approval_id", nargs="?")
+    p_appr.add_argument("--note", default="", help="operator note recorded with an abandon")
     p_appr.set_defaults(fn=cmd_approvals)
 
     p_console = sub.add_parser("console", help="serve the operator console (no credentials)")
