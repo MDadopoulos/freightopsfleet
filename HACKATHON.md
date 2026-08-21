@@ -17,7 +17,7 @@ answers all three with real mechanisms rather than claims.
 | Track requirement | What answers it here | Where |
 |---|---|---|
 | **Agents cataloged for cross-department use** | A code-owned catalog where every agent declares its desk, accountable owner, tool surface, data scope, autonomy level and per-run cost cap. Five agents across three departments — import ops, procurement, customer service. An agent not in the catalog is not in the fleet. | `src/freight_fleet/catalog/registry.py` |
-| **Context maintained safely across weeks of async operation** | A shipment is genuinely a multi-week object: booked in week 1, sails in week 2, arrives in week 5, and discrepancies surface at any point. Durable sessions carry what the fleet already found; a scheduled sweep re-checks open shipments unattended and stops at the gate. | `BUILD-PLAN.md` step 6 |
+| **Context maintained safely across weeks of async operation** | A shipment is genuinely a multi-week object: booked in week 1, sails in week 2, arrives in week 5, and discrepancies surface at any point. Sessions are durable (`cli chat` over `DatabaseSessionService`): kill the process, start another, and the fleet still knows what it found. The unattended sweep (`cli sweep`) re-checks every open shipment with nobody watching and stops at the gate — drafts held, outbox untouched. | `src/freight_fleet/cli.py` (`chat`, `sweep`) |
 | **Interacting with production data without violating compliance or security** | One gate seam classifies every tool call: read-only runs, consequential holds for a human, unknown fails closed. Nothing leaves the building — the fleet drafts, the operator sends. Every decision lands in an append-only ledger the operator can show their boss. | `src/freight_fleet/governance/` |
 
 ---
@@ -77,5 +77,9 @@ Include something like this in the submission. Judges reward it, and it is true.
   this hackathon** and are reused here as content; all ADK integration,
   governance code, catalog, grader and evaluation harness are new work built
   during the submission window. See `docs/REUSE-LEDGER.md`.
-- Multi-week async operation is demonstrated with **seeded session history**, not
-  by having actually run for three weeks.
+- Sessions genuinely survive process death (kill-restart-resume is demonstrated
+  live), and the sweep genuinely runs unattended — but the **multi-week timescale
+  is compressed**: the fleet has not literally run for three weeks.
+- The scoreboard's manual tier (`g7`, `g8`) is reviewed by eye, and that review
+  found both correct — including `g8` catching the seeded destination-port trap
+  (Hamburg requested, both quotes to Rotterdam). Eye-review is still not a regex.

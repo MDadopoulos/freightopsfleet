@@ -21,7 +21,12 @@ Don't explain AI. Explain the gap.
 
 ## 0:20–1:10 — The hero run
 
-Ask the fleet to cross-check the shipment. Let it run — do not cut away.
+```bash
+python -m freight_fleet.cli chat --session demo \
+  "Cross-check the documents in shipments/shp-002-hero"
+```
+
+Let it run — do not cut away.
 
 Point at the routing when the coordinator hands off to `cross_check`: five
 desks, and the request found the right one without being told.
@@ -32,7 +37,10 @@ honesty is the feature, not filler.
 
 ## 1:10–1:40 — The gate (the moment that wins the track)
 
-Ask it to draft the discrepancy notice to the shipper and save it.
+```bash
+python -m freight_fleet.cli chat --session demo \
+  "Draft the discrepancy notice and save it to outbox/shp-002-notice.md"
+```
 
 It drafts. Then it stops.
 
@@ -40,9 +48,15 @@ It drafts. Then it stops.
 > happens unattended — the agent tells me what's waiting and gives me an
 > approval id. Nothing is in outbox yet."
 
-Show the empty `outbox/`. Approve. Show the file appear.
+Show the empty `outbox/`. Then, on camera:
 
-Then show the ledger — every decision, in order: held, approved, executed.
+```bash
+python -m freight_fleet.cli approvals list     # the draft, previewed
+ls workspace/outbox                            # empty
+python -m freight_fleet.cli approvals grant <id>
+ls workspace/outbox                            # the notice exists
+python -m freight_fleet.cli ledger             # held -> approved -> executed
+```
 
 > "That's what the ops lead shows their boss."
 
@@ -55,8 +69,20 @@ a data scope, and an autonomy level.
 > what it's allowed to do on its own. An agent that isn't in the catalog isn't in
 > the fleet."
 
-If step 6 landed: show a session resumed from three weeks earlier, and the
-overnight scheduled run that found a discrepancy and held it.
+Then the async story — both halves are built, show them for real:
+
+```bash
+# a NEW process, same session id - it remembers without re-reading:
+python -m freight_fleet.cli chat --session demo \
+  "Without re-reading anything: what did we find on that shipment?"
+
+# the unattended sweep - every open shipment, nobody watching:
+python -m freight_fleet.cli sweep --date demo-day
+ls workspace/outbox   # still empty; every notice HELD, none written
+```
+
+Read the sweep's closing line out loud: "N drafts held for approval; nothing
+sent, nothing written." That sentence is the track requirement.
 
 ## 2:10–2:50 — The evidence
 

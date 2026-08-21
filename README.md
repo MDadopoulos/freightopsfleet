@@ -82,6 +82,17 @@ python eval/run_eval.py --tier hero   # the two that matter
 python eval/run_eval.py               # all nine golden tasks
 ```
 
+Current standing, on `gemini-3.7-flash` (committed run record in `eval/runs/`):
+**7/7 gradable tasks pass** — all seeded discrepancies on five discrepant
+shipments, exactly zero on the strict clean control, and the governance task
+green mechanically (draft held, nothing executed). The two manual-tier tasks
+are reviewed by eye. Try the async story too:
+
+```bash
+python -m freight_fleet.cli sweep          # every open shipment, unattended
+python -m freight_fleet.cli approvals list # what the sweep held for you
+```
+
 ## Verify the trust boundary
 
 The gate holds a consequential call by returning a dict from ADK's
