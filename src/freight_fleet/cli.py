@@ -1,6 +1,7 @@
 """Fleet CLI — chat, catalog, approvals, ledger.
 
     python -m freight_fleet.cli chat --session SID "message"
+    python -m freight_fleet.cli sweep [--date TAG]
     python -m freight_fleet.cli catalog
     python -m freight_fleet.cli ledger [--session SID]
     python -m freight_fleet.cli approvals list
@@ -82,6 +83,70 @@ def cmd_chat(args: argparse.Namespace) -> int:
         return 0
 
     return asyncio.run(turn())
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """The unattended morning run (BUILD-PLAN step 6b): cross-check every open
+    shipment, hold anything consequential, touch nothing. Cloud Scheduler at
+    deploy time simply cron-invokes this command - the honesty of the async
+    story is that nobody needs to be watching when it runs."""
+    import asyncio
+    from pathlib import Path
+
+    from google.adk.runners import Runner
+    from google.adk.sessions import InMemorySessionService
+    from google.genai import types
+
+    from .agents.fleet import _specialist
+    from .catalog.registry import get_card
+    from .governance.gate import make_before_tool_gate
+
+    workspace = Path(os.environ.get("FREIGHT_WORKSPACE_ROOT", "./workspace"))
+    shipments = sorted(p.name for p in (workspace / "shipments").iterdir() if p.is_dir())
+    if not shipments:
+        print("  no shipments in the workspace - seed it first")
+        return 1
+
+    session_id = f"sweep-{args.date}" if args.date else "sweep"
+    ledger = Ledger(_LEDGER_PATH)
+    store = _approval_store()
+    gate = make_before_tool_gate(ledger, store, session_id=session_id)
+    card = get_card("cross_check")
+
+    async def one(shipment: str) -> str:
+        agent = _specialist(card, args.model, gate)
+        session_service = InMemorySessionService()
+        sid = f"{session_id}-{shipment}"
+        await session_service.create_session(app_name=_APP, user_id=_USER, session_id=sid)
+        runner = Runner(agent=agent, app_name=_APP, session_service=session_service)
+        prompt = (
+            f"Unattended morning sweep. Cross-check shipments/{shipment}. "
+            "If there are discrepancies, draft the notice and save it under outbox/ "
+            "(it will be held for approval). Finish with one line: "
+            f"'{shipment}: N discrepancies'."
+        )
+        final = ""
+        async for event in runner.run_async(
+            user_id=_USER, session_id=sid,
+            new_message=types.Content(role="user", parts=[types.Part(text=prompt)]),
+        ):
+            if event.is_final_response() and event.content and event.content.parts:
+                final = "".join(p.text or "" for p in event.content.parts)
+        return final
+
+    async def run_all() -> None:
+        print(f"\n  SWEEP {session_id} - {len(shipments)} open shipment(s)\n")
+        for shipment in shipments:
+            final = await one(shipment)
+            last = next((ln.strip() for ln in reversed(final.splitlines()) if ln.strip()), "")
+            print(f"  {shipment:24} {last[:120]}")
+        pending = store.pending()
+        print(f"\n  {len(pending)} draft(s) held for approval; nothing sent, nothing written.")
+        for aid, payload in pending.items():
+            print(f"    {aid}  {payload.get('args', {}).get('path', '?')}")
+
+    asyncio.run(run_all())
+    return 0
 
 
 def cmd_catalog(_args: argparse.Namespace) -> int:
@@ -219,6 +284,11 @@ def main() -> int:
     p_chat.add_argument("--session", default="local")
     p_chat.add_argument("--model", default=os.environ.get("FREIGHT_MODEL", "gemini-3.7-flash"))
     p_chat.set_defaults(fn=cmd_chat)
+
+    p_sweep = sub.add_parser("sweep", help="unattended cross-check of every open shipment")
+    p_sweep.add_argument("--date", default="", help="tag for the sweep session id")
+    p_sweep.add_argument("--model", default=os.environ.get("FREIGHT_MODEL", "gemini-3.7-flash"))
+    p_sweep.set_defaults(fn=cmd_sweep)
 
     sub.add_parser("catalog", help="print the fleet catalog").set_defaults(fn=cmd_catalog)
 
