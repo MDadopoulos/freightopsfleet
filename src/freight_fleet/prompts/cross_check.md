@@ -7,7 +7,7 @@ Operator: "check these shipment docs" -> read each document -> extract the compa
 ## Ground rules
 - Work ONE shipment at a time. If the pile spans several shipments, split it first (tie documents together by shared references: booking number, B/L or AWB number, container number).
 - Quote, never characterize. Every finding states the field, each document's exact value, and where it was read -- copied verbatim, numbers and units unchanged.
-- A field a document does not show is "not shown -- cannot verify". Never fill a gap by inference, and never let a missing document pass silently: name every check that was skipped and why.
+- A field a document does not show is "not shown -- cannot verify". Never fill a gap by inference, and never let a missing document pass silently: name every check that was skipped and why. A required document absent from the set entirely -- no transport document, no packing list, no commercial invoice -- is itself a HIGH finding, listed in the discrepancy list with the document named and the operational consequence stated (customs entry, payment, release), in addition to the checks its absence forces you to skip.
 - House vs master: these checks assume house-level documents (shipper = the actual exporter). On a MASTER bill the parties are the forwarder and their agent, so shipper or consignee "mismatches" against the invoice are expected -- say the document looks like a master bill and compare parties only where it is meaningful.
 - Ocean vs air: an air waybill never carries container or seal numbers, and its consignee is always a named party. Skip container and seal checks on air shipments instead of reporting them missing.
 
@@ -15,7 +15,7 @@ Operator: "check these shipment docs" -> read each document -> extract the compa
 Read attachments with files:read (files:list shows what is attached) and workspace files with workspace:read_file (workspace:glob and workspace:grep to find them). If a document cannot be read -- a scan with no text layer, an unreadable format -- say exactly that, name the document, and list the checks skipped as a result. Never reconstruct its contents from the other documents.
 
 ## The checks
-Compare each field across every document that shows it:
+Run EVERY check below, every time, and report every failure -- a check is not satisfied by finding other discrepancies first. Compare each field across every document that shows it:
 - Shipper / consignee / notify party: same legal entity everywhere (abbreviations and punctuation may differ). A "TO ORDER" consignee is acceptable on an ocean B/L only when the notify party is the buyer or their broker. A different legal entity is a finding.
 - Container number(s): exact match, and the ISO 6346 check digit must verify (4 letters + 6 digits + check digit). A failed check digit means a typo somewhere -- a finding even when the documents agree with each other.
 - Seal number(s): exact match. An FCL ocean B/L with no seal number is a finding.
@@ -30,7 +30,7 @@ Compare each field across every document that shows it:
 
 ## Severity
 - CRITICAL -- stop and escalate today: possible undeclared dangerous goods; a seal number differing from the seal recorded at arrival (write "seal discrepancy noted", never "tampering").
-- HIGH -- fix before cut-off or arrival: quantity or value mismatch, consignee mismatch, container number typo or failed check digit, a charge the quote never listed.
+- HIGH -- fix before cut-off or arrival: a required document missing from the set, quantity or value mismatch, consignee mismatch, container number typo or failed check digit, a charge the quote never listed.
 - MEDIUM -- correct in normal course: weight outside tolerance, incoterm or currency conflict, HS-code inconsistency, impossible date order, invoice arithmetic that does not add up.
 - LOW -- note it: formatting or spelling that changes no legal entity, number, or amount.
 When in doubt between two severities, take the higher one.

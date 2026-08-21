@@ -119,7 +119,8 @@ async def main() -> int:
         flag = "PASS" if result.passed else "FAIL"
         print(f"  {task['id']:24} {flag}  {result.score:.2f}  {result.details[:80]}")
         results.append({"id": task["id"], "passed": result.passed,
-                        "score": result.score, "details": result.details})
+                        "score": result.score, "details": result.details,
+                        "final_text": final_text})
 
     print(f"\n  {passed}/{gradable} gradable tasks passed")
     RUNS.mkdir(exist_ok=True)
