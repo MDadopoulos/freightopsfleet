@@ -1,0 +1,17 @@
+# The answer keys must never enter the image. eval/ is excluded wholesale and
+# re-listed here as well as in the COPY set, because a leak here would make
+# every score meaningless and the cost of saying it twice is zero.
+eval/
+.venv/
+.git/
+audit/
+data/
+workspace/
+tests/
+scripts/
+docs/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.env

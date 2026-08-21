@@ -47,6 +47,7 @@ framework.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from google.adk.agents import LlmAgent
@@ -106,8 +107,14 @@ def _specialist(card: AgentCard, model: str, gate) -> LlmAgent:
     )
 
 
+#: The fleet's model, one place. Deployed containers set FREIGHT_MODEL; a stale
+#: hardcoded default here is how a deploy silently runs a model the scoreboard
+#: never graded.
+DEFAULT_MODEL = os.environ.get("FREIGHT_MODEL", "gemini-3.7-flash")
+
+
 def build_fleet(
-    model: str = "gemini-2.5-flash",
+    model: str = DEFAULT_MODEL,
     ledger: Ledger | None = None,
     approvals: ApprovalStore | None = None,
     session_id: str = "local",
