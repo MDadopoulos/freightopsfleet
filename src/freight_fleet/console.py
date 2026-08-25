@@ -109,6 +109,21 @@ def _workspace_root() -> Path:
     return workspace.WORKSPACE_ROOT
 
 
+def _sweep_schedule() -> str:
+    """The operator's sweep cadence, verbatim, for DISPLAY ONLY.
+
+    The schedule is deliberately not this application's to know or to change —
+    it lives in whatever runs the sweep (Cloud Scheduler in the deployed shape,
+    cron or a human on a laptop), because a settings screen that could edit it
+    would need credentials that can mutate infrastructure, and this console's
+    entire safety claim is that it holds none and cannot act. So the operator
+    *tells* the console what they configured, as one env var, and the console
+    repeats it. If the two ever disagree, the env var is the one that is wrong —
+    which is exactly the trust ranking a read-only surface should have.
+    """
+    return os.environ.get("FREIGHT_SWEEP_SCHEDULE", "").strip()
+
+
 def _readonly() -> bool:
     return bool(os.environ.get("FREIGHT_CONSOLE_READONLY"))
 
@@ -565,6 +580,12 @@ hr{border:0;border-top:1px solid var(--line);margin:24px 0}
       border-radius:0;border-left-width:6px;margin-inline:0}
   .qcard{border-radius:0}
   .brand .long{display:none}
+  /* The four links plus their badges are wider than a phone. `overflow-x:auto`
+     technically saves them, but a nav that CLIPS with no affordance reads as
+     broken — "Evidence" was simply not there. Wrap to a second row instead:
+     everything visible, nothing to discover by accident. */
+  .nav .in{flex-wrap:wrap;height:auto;min-height:56px;padding-block:8px;align-content:center}
+  .navlinks{margin-left:0;flex-basis:100%;justify-content:space-between}
   .hero{gap:24px}
   .hero .rest{gap:32px;width:100%}
 }
@@ -1264,6 +1285,12 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
 
     flash = _flash(entries, pending, decided, why) if decided else ""
 
+    schedule = _sweep_schedule()
+    schedule_line = (
+        f'<p class="meta">Unattended sweep schedule: {esc(schedule)} — set by the operator '
+        "where the sweep runs (Cloud Scheduler, cron), never from this console. This screen "
+        "can repeat it; nothing here can change it.</p>" if schedule else ""
+    )
     if not entries:
         brief = (
             '<div class="card"><div class="count">0</div>'
@@ -1272,7 +1299,9 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
             '<p class="lede" style="margin-top:16px">The ledger at '
             f'<span class="mono">{esc(_ledger_path())}</span> is empty. The fleet writes it on its '
             "first tool call.</p>"
-            '<p class="mono">python -m freight_fleet.cli sweep</p></div>'
+            '<p class="mono">python -m freight_fleet.cli sweep</p>'
+            + schedule_line
+            + "</div>"
         )
     else:
         if holds:
@@ -1321,7 +1350,9 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
             "</div></div>"
             f'<p class="lede">{sentence}</p>{quickstart}'
             '<p class="meta">send_email is classified CRITICAL and unwired — the constant 0 above '
-            "is a property of the fleet, not of today.</p></div>"
+            "is a property of the fleet, not of today.</p>"
+            + schedule_line
+            + "</div>"
         )
 
     if holds:
