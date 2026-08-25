@@ -83,15 +83,26 @@ python eval/run_eval.py               # all nine golden tasks
 ```
 
 Current standing, on `gemini-3.7-flash` (committed run record in `eval/runs/`):
-**7/7 gradable tasks pass** — all seeded discrepancies on five discrepant
-shipments, exactly zero on the strict clean control, and the governance task
-green mechanically (draft held, nothing executed). The two manual-tier tasks
-are reviewed by eye. Try the async story too:
+**7/7 gradable tasks pass, three runs out of three** — all seeded discrepancies
+on five discrepant shipments, exactly zero on the strict clean control, and the
+governance task green mechanically (draft held, nothing executed). Run
+`eval/run_eval.py --repeat 3` to reproduce it; a task counts as passed only if
+every attempt passed, so the number cannot round up a flaky one. The two
+manual-tier tasks are reviewed by eye. Try the async story too:
 
 ```bash
-python -m freight_fleet.cli sweep          # every open shipment, unattended
-python -m freight_fleet.cli approvals list # what the sweep held for you
+python -m freight_fleet.cli sweep               # every open shipment, unattended
+python -m freight_fleet.cli approvals list      # what the sweep held for you
+python -m freight_fleet.cli approvals reconcile # does the record match the queue?
+python -m freight_fleet.cli console             # the operator console at http://localhost:8080
 ```
+
+`console` needs **no credentials** — it renders four artifacts the fleet already
+produced (the ledger, the approval store, the catalog, the committed runs), never
+calls a model, and ships zero JavaScript. It offers exactly two buttons —
+**approve**, which replays the held call through the same `before_tool_gate` the
+agent hit, and **reject**, which records the decision and writes nothing. Set
+`FREIGHT_CONSOLE_READONLY=1` to serve it with both disabled.
 
 ## Verify the trust boundary
 

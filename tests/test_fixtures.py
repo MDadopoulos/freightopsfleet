@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from grader import grade_clean, grade_discrepant
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,3 +89,44 @@ def test_clean_control_tolerates_a_checks_performed_section():
         "Checks performed:\n- gross weight\n- container check digit\n- incoterm coherence\n"
     )
     assert grade_clean(report).passed
+
+
+def test_grader_rejects_a_report_that_clears_every_real_discrepancy():
+    """The scoreboard must measure DETECTION, not string presence.
+
+    This report fabricates four findings, then prints every real conflicting
+    value below them under "OK - reconciles" - the exact opposite of the correct
+    answer. Block-scoped matching scored it 1.00; bullet scoping fails it.
+    Without this seal the headline number means nothing.
+    """
+    report = """
+DISCREPANCIES FOUND: 4
+- The consignee address is formatted inconsistently across documents.
+- The vessel name uses different capitalization on two documents.
+- The shipper's phone number is absent from the packing list.
+- The document dates use two different formats.
+
+Checks performed (all reconciled, no action needed):
+| Gross weight | B/L 6,098.0 kg vs packing list 5,384.0 kg | OK - reconciles |
+| Cartons      | 740 vs 720                                 | OK - reconciles |
+| Incoterm     | FOB vs freight prepaid                     | OK - consistent |
+| Invoice line | 43,620.00 vs computed 42,600.00            | OK - correct    |
+"""
+    assert not grade_discrepant(report, "shp-002-hero").passed
+
+
+def test_grader_needs_both_values_in_the_SAME_bullet():
+    """Two half-findings are not one finding. A bullet naming only the B/L
+    weight and another naming only the packing-list weight never states the
+    conflict, which is the thing an operator acts on."""
+    split = ("DISCREPANCIES FOUND: 2\n"
+             "- The bill of lading states a gross weight of 6,098.0 kg.\n"
+             "- The packing list totals 5,384.0 kg.\n")
+    assert not grade_discrepant(split, "shp-002-hero").passed
+
+    together = ("DISCREPANCIES FOUND: 4\n"
+                "- Gross weight: B/L 6,098.0 kg vs packing list 5,384.0 kg.\n"
+                "- Cartons: invoice 740 vs packing list 720.\n"
+                "- Incoterm FOB Shanghai vs B/L FREIGHT PREPAID.\n"
+                "- Invoice line 2 totals 43,620.00; 6,000 x 7.10 = 42,600.00.\n")
+    assert grade_discrepant(together, "shp-002-hero").passed

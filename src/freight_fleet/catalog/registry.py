@@ -10,7 +10,7 @@ authority for the /fleet API surface and the demo's catalog screen.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Final
 
 
@@ -41,7 +41,8 @@ FLEET: Final[tuple[AgentCard, ...]] = (
             "each other, flags every discrepancy with a severity, and drafts the correction notice."
         ),
         prompt_file="cross_check.md",
-        tools=("read_file", "list_files", "glob_files", "grep_files", "write_file"),
+        tools=("read_file", "list_files", "glob_files", "grep_files", "write_file",
+               "check_container_number"),
         data_scope="shipments/** (read), outbox/** (draft)",
         autonomy="drafts-for-approval",
     ),

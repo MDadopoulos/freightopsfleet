@@ -63,6 +63,14 @@ TOOL_SPECS: Final[dict[str, ToolSpec]] = {
     "glob_files": ToolSpec("glob_files", Risk.LOW,      False, "Find workspace files by glob pattern."),
     "grep_files": ToolSpec("grep_files", Risk.LOW,      False, "Search workspace file contents."),
     "write_file": ToolSpec("write_file", Risk.HIGH,     False, "Create or overwrite a workspace file."),
+    # Pure arithmetic over its argument: reads nothing, writes nothing, touches
+    # nothing outside the call. LOW is not a concession here — a tool that cannot
+    # act is the only kind that is genuinely safe to run unattended, and making
+    # the model ASK before it may check a checksum would just push it back to
+    # doing the sum in its head.
+    "check_container_number": ToolSpec(
+        "check_container_number", Risk.LOW, False,
+        "Verify a container number's ISO 6346 check digit."),
     "send_email": ToolSpec("send_email", Risk.CRITICAL, True,  "Transmit a drafted notice. NOT WIRED in V1."),
     # Delegation to a specialist desk. LOW because the delegation itself only
     # moves text: every tool call the specialist then makes re-enters this same

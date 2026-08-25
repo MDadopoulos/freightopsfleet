@@ -15,14 +15,15 @@ import json
 import os
 import threading
 import uuid
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from collections.abc import Iterator
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 @dataclass(frozen=True)
@@ -36,13 +37,13 @@ class LedgerEntry:
     tool: str
     risk: str
     verdict: str
-    outcome: str           # auto_ran | held | approved | rejected | blocked | executed
+    outcome: str           # auto_ran | held | approved | rejected | blocked | executed | abandoned
     args_digest: dict[str, Any]
     detail: str = ""
     approval_id: str | None = None
 
     @staticmethod
-    def new(**kw: Any) -> "LedgerEntry":
+    def new(**kw: Any) -> LedgerEntry:
         return LedgerEntry(entry_id=str(uuid.uuid4()), ts=_now(), **kw)
 
 

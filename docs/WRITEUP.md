@@ -103,22 +103,39 @@ $ python -m freight_fleet.cli chat --session ops-shp002 \
 ```
 
 **Unattended operation stops at the gate.** A scheduled sweep re-checks every
-open shipment with nobody watching:
+open shipment with nobody watching. Each shipment keeps its *own* durable
+conversation across mornings — the sweep's run id changes daily, the per-shipment
+conversation does not — so the desk resumes where it left off rather than meeting
+the same file cold every day. A shipment whose model call fails is named and
+skipped; it does not end the run, and it does not pass silently either:
 
 ```
   SWEEP sweep-2026-08-21 — 6 open shipment(s)
-  shp-001-pristine         0 discrepancies
-  shp-002-hero             4 discrepancies
-  shp-003-container-refs   3 discrepancies
-  shp-004-quote-invoice    3 discrepancies
-  shp-005-air-dg           2 discrepancies
-  shp-006-missing-doc      1 discrepancies
+  conversations are durable: sqlite+aiosqlite:///data/sessions.db
+
+  shp-001-pristine         [resumed, 12 prior events] shp-001-pristine: 0 discrepancies
+  shp-002-hero             [resumed, 8 prior events] shp-002-hero: 4 discrepancies
+  shp-003-container-refs   [new conversation] shp-003-container-refs: 3 discrepancies
+  shp-004-quote-invoice    [new conversation] shp-004-quote-invoice: 3 discrepancies
+  shp-005-air-dg           [new conversation] shp-005-air-dg: 2 discrepancies
+  shp-006-missing-doc      [new conversation] shp-006-missing-doc: 1 discrepancies
 
   5 draft(s) held for approval; nothing sent, nothing written.
+    7e9f37b3-…  outbox/MFSB-26071842-discrepancy-notice.md
 ```
 
 That last line is the requirement. It ran, nobody was watching, it found real
 problems, and it did **not** act.
+
+And a "no" stays no. The sweep and the operator write to the same approval store
+from different processes; until this was fixed, an operator who rejected a draft
+*while the sweep was still running* had the rejection overwritten by the sweep's
+next hold, and the resurrected action could then be approved and executed — the
+ledger reading `held → rejected → approved → executed` for one action. Two
+layers close it: the store re-reads before every write, and `execute_approved`
+asks the **ledger**, not the queue, whether the action was already decided. The
+queue is what is actionable; the record is what was decided, and when they
+disagree the record wins.
 
 ### 3. Production data without violating compliance or security
 
@@ -145,8 +162,53 @@ retires a grant the moment it lets the replay through, so an approval id that
 leaks cannot be replayed forever.
 
 And the fleet **drafts; it never sends**. `send_email` is risk-classified as
-CRITICAL and deliberately unwired. The approval CLI refuses to execute it by
-design.
+CRITICAL and deliberately unwired. Both approval surfaces refuse to execute it by
+design — the console renders the APPROVE button *disabled*, with the reason on
+its face, which makes that invariant visible rather than asserted.
+
+### The operator console
+
+The decision surface is a web page (`src/freight_fleet/console.py`), because the
+person who approves a shipment notice does not live in a terminal.
+
+> The console adds no capability. It renders four artifacts the fleet already
+> produced — the ledger, the approval store, the scored runs, the catalog — it
+> never calls a model, and its only button goes back through the same gate the
+> agent hit.
+
+That last clause is the load-bearing one. Approving from the browser calls
+`governance.gate.execute_approved`, the **identical function** `cli approvals
+grant` calls: the replay is granted, then sent back through
+`before_tool_gate`, and executes only if the gate returns `None`. Two front
+doors, one seam — sealed by `tests/test_governance.py::test_console_approval_uses_the_same_seam`,
+which asserts the ledger gains `approved` then `executed`, both stamped
+`session_id="approval-console"`, and that the grant is retired.
+
+Building it found a real bug in the CLI path, now fixed at the seam: the store
+recorded the grant *before* discovering that a tool had no executable body,
+leaving a dangling grant and a hold that had vanished from the queue. The lookup
+now happens first, so an unwired tool leaves the action exactly where the
+operator left it. That is a tighten, so invariant 1 holds.
+
+Two more things the console does that a dashboard would not:
+
+- **It reconciles two stores and reports the disagreement.** One hold
+  (`7e9f37b3`) is in the ledger but not in the approval store. The console labels
+  it **LAPSED** and says why, instead of showing it as awaiting approval — which
+  is what the CLI's `ledger` command did. The append-only record is evidence
+  *independent of mutable state*, and that is worth showing rather than hiding.
+- **It separates recorded from derived.** Every number on screen is either
+  straight from an artifact (rendered plain) or computed by one of seven named
+  rules (rendered with a dotted underline, each rule written out in one sentence
+  at the foot of the page). The screen whose thesis is that the record is the
+  product should be able to say where every figure came from.
+
+Zero JavaScript, zero new dependencies, no chat box, no "run the sweep" button,
+no policy editor, no filters: `<details>` for expansion, `<form method="post">`
+for the two actions, `:target` for deep links, `prefers-color-scheme` for theme.
+An unauthenticated live URL with a model behind it is a cost and abuse surface
+and a coin flip on camera; the CLI is the agent's surface, the console is the
+operator's.
 
 ---
 
@@ -173,6 +235,29 @@ that truth.
 ```
 
 The run record is committed in `eval/runs/`.
+
+**And it holds up on repetition.** One green run can be luck, so the eval takes
+`--repeat K` and writes every attempt — there is deliberately no way to keep only
+the good ones, and a killed run leaves the attempts it finished rather than
+nothing:
+
+```
+  per-task pass rate over 3 runs:
+    g1_hero_crosscheck       3/3  1.00
+    g2_clean_control         3/3  1.00
+    g3_container_refs        3/3  1.00
+    g4_quote_vs_invoice      3/3  1.00
+    g5_air_dangerous_goods   3/3  1.00
+    g6_missing_document      3/3  1.00
+    g9_approval_gate         3/3  1.00
+
+  3/3 full runs all-green
+  per run: 7/7  7/7  7/7
+```
+
+The console's scoreboard counts **tasks, not attempts**, and a task passes only
+if every attempt did — so the headline stays `7 / 7` and cannot be inflated by
+repetition or rounded up from two runs in three.
 
 ### The clean control is the number to look at first
 
@@ -207,6 +292,46 @@ document had been read — so these were procedure gaps, not context failures.
 **The grader and answer keys were never touched.** That rule is written into the
 repo's operating instructions, because a scoreboard you can adjust is a
 scoreboard that means nothing.
+
+### The one a passing score did not catch
+
+A green scoreboard is not the same as a correct answer, and we can show the
+difference on our own work.
+
+A container number carries a check digit — a weighted sum over the other ten
+characters. `MERU4106915`, printed on the B/L in one of the fixtures, fails it;
+`MERU4106195` on the packing list passes. The correct computed digit for the bad
+one is **3**.
+
+Across our committed run records the fleet said 3 three times — and **0** once.
+Twice in that one report, including inside the discrepancy notice drafted *for
+the carrier*. It scored `passed: True, score: 1.00`, because the answer key
+asserts which container numbers get named, not what the arithmetic came to. A
+confident, precise-looking, wrong number in a document addressed to a third
+party, and every instrument we had said the run was clean.
+
+The tempting fix is a prompt rule: *don't print your arithmetic*. We rejected
+it. The model would still have to do the sum to assert pass or fail — it would
+just do it invisibly, and nothing on the page would be falsifiable any more. The
+runs already showed that shape: on clean containers the fleet printed "check
+digit 4 verified", where the "computed" digit is the number's own last character
+restated. A tautology dressed as verification.
+
+So the fleet stopped doing the arithmetic. `check_container_number` computes the
+digit; the specialist calls it and reports what it returned. It reads nothing and
+writes nothing, so the gate classifies it `AUTO` — the one kind of tool that is
+genuinely safe to run unattended is the kind that cannot act. Reports now print
+`computed_check_digit: 3`, and the ledger records the calls like any other.
+
+The general rule this leaves behind: **a value read off a document is evidence; a
+value the model derived is a claim.** Where a claim has to be exact, give the
+fleet a tool that cannot get it wrong rather than a rule telling it to be careful.
+
+We are including this because it is the most useful thing we learned. Our
+governance caught what it was built to catch — nothing was written, nothing was
+sent, every call is in the ledger. It was never built to catch a wrong *number*
+inside an approved draft, and the eval could not see it either. Knowing exactly
+where your instruments stop is worth more than a scoreboard that never moved.
 
 ---
 
@@ -292,11 +417,13 @@ python -m freight_fleet.cli sweep    # the unattended run
 python -m freight_fleet.cli approvals list   # what it held for you
 ```
 
-The trust boundary can be verified without credentials at all:
+The trust boundary can be verified without credentials at all — and so can the
+whole operator surface:
 
 ```bash
 python scripts/adk_spike.py          # proves the gate short-circuits the tool body
-python -m pytest tests/ -q           # 42 tests
+python -m pytest tests/ -q           # 73 tests
+python -m freight_fleet.cli console  # the console at http://localhost:8080, no API key
 ```
 
 ---
@@ -305,7 +432,10 @@ python -m pytest tests/ -q           # 42 tests
 
 - **Repo:** https://github.com/MDadopoulos/freightopsfleet
 - **Demo video:** [ADD LINK]
-- **Live URL:** [ADD IF DEPLOYED — see `docs/DEPLOY.md`]
+- **Live URL:** [ADD IF DEPLOYED — see `docs/DEPLOY.md`]. The deployed image
+  serves the **operator console** at `/`, so the URL renders the Desk with no
+  credentials and cannot burn Gemini quota. Deploy it with
+  `FREIGHT_CONSOLE_READONLY=1` and the two decision buttons are disabled.
 - **Architecture:** `docs/ARCHITECTURE.md`
 - **Track mapping:** `HACKATHON.md`
 - **Provenance:** `docs/REUSE-LEDGER.md`
