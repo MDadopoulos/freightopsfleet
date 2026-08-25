@@ -39,28 +39,95 @@ governance claim is only true for one of them.
 
 ## 0. Before you start
 
-You need:
+### Yes, you need the repo on the machine you deploy from
 
-- A Google Cloud project with **billing enabled**. Yours is `neat-domain-494716-b3`
-  (that is what `GOOGLE_CLOUD_PROJECT` is already set to in this environment).
-- The `gcloud` CLI, authenticated as a user with Owner or Editor on that project.
-- The repo checked out locally.
+Three commands in this guide use `gcloud run deploy --source .` (§4, §4a, §5).
+That uploads **your current directory** to Cloud Build, which builds the image
+from the repo's `Dockerfile`. There is no "deploy from GitHub" shortcut here —
+if the working directory is not the repo, the build has nothing to build.
 
-Everything below is copy-pasteable. Set these once per shell:
+The steps that need the repo present: **§4, §4a, §5** (the three `--source .`
+deploys), **§7a's local test**, and **§8 step 5**. Everything else — enabling
+APIs, Secret Manager, IAM, the scheduler, and every `curl` in §8 — is pure
+`gcloud`/HTTP and works from anywhere you are logged in.
+
+### Option A — Cloud Shell (recommended; installs nothing)
+
+Open <https://shell.cloud.google.com>. It is free, browser-based, and comes with
+`gcloud`, `git` and Python already installed **and already authenticated as
+you** — which removes the whole "install the CLI, then log in" step, and is the
+fastest way to get from zero to a deployed service.
 
 ```bash
-export PROJECT_ID=neat-domain-494716-b3
-export REGION=europe-west1          # pick one near you; must support Cloud Run
+git clone https://github.com/MDadopoulos/freightopsfleet.git
+cd freightopsfleet
+python3 --version        # needs 3.11+; Cloud Shell is current
+```
+
+Three things worth knowing before you rely on it:
+
+- **Web Preview** (the icon top-right) exposes ports 8080–8084 in the browser,
+  which is how you reach the authenticated ops console from §4a without a
+  tunnel on your own machine.
+- `$HOME` persists (5 GB), but the VM is recycled after inactivity — a session
+  idles out after ~20 minutes and is capped at ~12 hours. Your clone survives;
+  a long-running process does not. Do not start a `--repeat 3` eval and walk
+  away.
+- For §7a, if the ADC check complains about credentials, run
+  `gcloud auth application-default login` in Cloud Shell too. Being logged in
+  for `gcloud` and having ADC for *client libraries* are related but not always
+  the same thing, and that command settles it either way.
+
+### Option B — your own machine
+
+```bash
+git clone https://github.com/MDadopoulos/freightopsfleet.git
+cd freightopsfleet
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+```
+
+You will also need the `gcloud` CLI installed
+(<https://cloud.google.com/sdk/docs/install>) and authenticated:
+
+```bash
+gcloud auth login
+gcloud auth application-default login   # separate command, needed for §7a
+```
+
+Those two are genuinely different: `auth login` authenticates the `gcloud`
+command, `auth application-default login` writes the credentials Python client
+libraries read. Skipping the second is the most common reason §7a's test fails
+with "could not resolve project using application default credentials".
+
+The local venv is only needed for the §7a test and the eval — the Cloud Run
+builds do not use it, and `.dockerignore` keeps it out of the upload.
+
+### Either way, you need
+
+- A Google Cloud project with **billing enabled** (credits count as billing, but
+  the account must have a billing account attached).
+- Owner or Editor on that project — you will be creating service accounts and
+  granting IAM roles.
+
+Set these once per shell, and re-set them if your Cloud Shell session recycles:
+
+```bash
+export PROJECT_ID=neat-domain-494716-b3    # your project id
+export REGION=europe-west1                 # pick one near you; must support Cloud Run
 export SERVICE=freight-ops-fleet
 export JOB=freight-ops-sweep
-export REPO=freight-ops             # Artifact Registry repo name
+export OPS=freight-ops-console
+export REPO=freight-ops                    # Artifact Registry repo name
 
 gcloud config set project "$PROJECT_ID"
 gcloud config set run/region "$REGION"
 ```
 
 **Why `europe-west1`:** the demo is a Hamburg import desk, and keeping the
-service near you keeps the demo responsive on camera. Any Cloud Run region works.
+service near you keeps it responsive on camera. Any Cloud Run region works — but
+if you switch to Vertex in §7a, note that the *model* endpoint is set separately
+by `GOOGLE_CLOUD_LOCATION`, and `global` is usually the right value there
+regardless of which region you run the container in.
 
 ---
 
@@ -241,11 +308,10 @@ hackathon URL, not for anything real.
 The public service can show the queue and refuse every decision. You still need
 somewhere the approve button *works*, and it must not be the same URL.
 
-Deploy the same image a second time, authenticated, with the read-only flag off:
+Deploy the same image a second time, authenticated, with the read-only flag off
+(`$OPS` is set in §0):
 
 ```bash
-export OPS=freight-ops-console
-
 gcloud run deploy "$OPS" \
   --source . \
   --service-account "$SA" \
@@ -272,6 +338,10 @@ token for you, so the browser needs no plugin and you paste no credentials:
 gcloud run services proxy "$OPS" --region "$REGION" --port 8081
 # now open http://localhost:8081 — buttons live, everything else identical
 ```
+
+**In Cloud Shell**, run the same command and then use **Web Preview → Preview on
+port 8081** (the icon at the top right). Same tunnel, no local install; this is
+the reason §0 suggests Cloud Shell if you have not already got `gcloud` set up.
 
 **Why two services and not one with a password.** A shared password in an env
 var is a secret that leaks into shell history, screen shares and screenshots —
@@ -749,6 +819,7 @@ gcloud run services proxy "$SERVICE" --region "$REGION"   # then use localhost:8
 | `No module named freight_fleet` | `pip install .` ran before `src/` was copied | Keep the Dockerfile's COPY order: `pyproject.toml` + `src/`, then install. |
 | `ValueError: No API key was provided` | Secret not mounted, or the SA lacks `secretAccessor` | `gcloud run services describe $SERVICE --format='value(spec.template.spec.containers[0].env)'` and re-check §3. |
 | Request dies at ~5 minutes | Cloud Run default 300s timeout | `--timeout 600` (§4). |
+| `gcloud run deploy` fails with no Dockerfile / nothing to build | Not run from the repo root | `--source .` uploads the current directory — `cd` into the clone first. See §0. |
 | Console shows an empty desk right after the sweep held drafts | Job and Service have separate filesystems | Mount one bucket into both — §4b. This is the most common cloud-only failure. |
 | `POST /decision/.../approve` returns 302 on the public URL | `FREIGHT_CONSOLE_READONLY` not set | Redeploy §4 with the flag; verify with §8 step 4 before demoing. |
 | `reconcile.json` says `diverged: true` on a fresh deploy | Console and Job reading different paths | Check both carry the same `FREIGHT_LEDGER_PATH` / `FREIGHT_APPROVALS_PATH`. |
