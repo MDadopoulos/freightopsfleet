@@ -207,7 +207,7 @@ From the repo root:
 gcloud run deploy "$SERVICE" \
   --source . \
   --service-account "$SA" \
-  --set-env-vars "FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_CONSOLE_READONLY=1" \
+  --set-env-vars "FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_CONSOLE_READONLY=1,FREIGHT_SWEEP_SCHEDULE=weekdays 06:00 Europe/Athens" \
   --memory 1Gi \
   --cpu 1 \
   --timeout 600 \
@@ -485,6 +485,17 @@ gcloud run jobs add-iam-policy-binding "$JOB" \
 ```
 
 `0 6 * * 1-5` is 06:00 on weekdays. Freight desks do not sweep on Sunday.
+
+**The time is yours, not the app's.** Nothing in the code knows about 06:00 —
+the sweep is a command, and *when* it runs is operator policy expressed here,
+in Cloud Scheduler. Change the cadence by editing this one job
+(`gcloud scheduler jobs update http freight-ops-morning-sweep --schedule "..."`),
+per deployment, per customer. There is deliberately no schedule setting inside
+the console: a screen that could edit the schedule would need credentials that
+mutate infrastructure, and the console's safety claim is that it holds none.
+The desk *displays* the cadence read-only from `FREIGHT_SWEEP_SCHEDULE` (set in
+§4) — if you change the cron here, update that env var to match, because the
+console repeats what you tell it and cannot check.
 
 Force a firing to prove the wiring without waiting for morning:
 

@@ -411,3 +411,37 @@ def test_a_single_run_is_unchanged_by_the_collapse(world):
     assert ">6 / 6<" in body
     assert "attempts</span>" not in body, "no attempt tally when there is one attempt"
     assert "Every task was run" not in body
+
+
+# --- the schedule is the operator's, displayed and never editable ------------
+#
+# A settings screen that could change the cadence would need credentials that
+# mutate infrastructure, and the console's safety claim is that it holds none.
+# So the schedule arrives as one env var, display-only.
+
+
+def test_the_desk_repeats_the_operator_schedule(world, monkeypatch):
+    monkeypatch.setenv("FREIGHT_SWEEP_SCHEDULE", "weekdays 06:00 Europe/Athens")
+
+    body = world.client.get("/").text
+    assert "Unattended sweep schedule: weekdays 06:00 Europe/Athens" in body
+    assert "never from this console" in body
+
+
+def test_no_schedule_configured_means_no_schedule_claimed(world, monkeypatch):
+    """An empty env var must not render an empty label — a blank schedule line
+    would read as 'there is a schedule and it is nothing'."""
+    monkeypatch.delenv("FREIGHT_SWEEP_SCHEDULE", raising=False)
+
+    body = world.client.get("/").text
+    assert "Unattended sweep schedule" not in body
+
+
+def test_the_schedule_is_escaped_like_any_other_input(world, monkeypatch):
+    """The env var is operator-controlled, but the console escapes every value
+    it prints; a schedule string is not an exception to that rule."""
+    monkeypatch.setenv("FREIGHT_SWEEP_SCHEDULE", 'daily <script>alert(1)</script>')
+
+    body = world.client.get("/").text
+    assert "<script>alert(1)</script>" not in body
+    assert "&lt;script&gt;" in body
