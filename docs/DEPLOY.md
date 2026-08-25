@@ -83,6 +83,14 @@ switch to Vertex (§7); the rest are needed for every path below.
 
 ## 2. Put the API key in Secret Manager
 
+> **If you have Cloud credits, read §7a first.** This section sets up an AI
+> Studio API key, which bills through the Gemini Developer API and **does not
+> draw on Google Cloud credits**. §7a routes the model through Vertex AI
+> instead, using the service account you are about to create and no key file at
+> all. You can do §2 now and switch later — nothing here is wasted — but if you
+> already know you want the credits to pay for inference, skip to §7a and come
+> back.
+
 Never bake the key into the image or a `--set-env-vars` flag — it would then sit
 in your deployment history and in `gcloud run services describe` output forever.
 
@@ -331,7 +339,9 @@ two-process case and applies unchanged.
 ## 5. Deploy the sweep as a Job
 
 The sweep is not a web request — it is a scheduled batch run that must exit.
-Cloud Run **Jobs**, not Services:
+Cloud Run **Jobs**, not Services. This and §4a are the only two deployments that
+call a model, so they are the only two that need model credentials — swap the
+`--set-secrets` line below for the Vertex variables if you are following §7a:
 
 ```bash
 gcloud run jobs deploy "$JOB" \
@@ -414,7 +424,7 @@ gcloud scheduler jobs run freight-ops-morning-sweep --location "$REGION"
 
 ---
 
-## 7. Optional: switch sessions to Vertex
+## 7. Optional: durable conversations (Cloud SQL or Agent Engine)
 
 The local default is SQLite, which lives inside the container — good enough for
 the demo, but a Cloud Run instance is ephemeral, so sessions die with it. Two
@@ -446,40 +456,150 @@ Spend the day on the recording instead.
 
 ---
 
-## 7a. Spending your GCP credits on inference (Vertex instead of AI Studio)
+## 7a. Run the model through Google Cloud (Vertex AI) instead of AI Studio
 
-This matters if you were granted Cloud credits. A `GOOGLE_API_KEY` from AI
-Studio bills through **Google AI Studio / the Gemini Developer API**, which is a
-different billing path from Google Cloud — your Cloud credits do not pay for it.
-Cloud Run, Secret Manager and GCS *are* covered; the model calls are not.
+**Do this if you were granted Cloud credits.** An AI Studio `GOOGLE_API_KEY`
+bills through the Gemini Developer API, which is a **separate billing path from
+Google Cloud** — your Cloud credits do not pay for it. Cloud Run, Secret
+Manager and GCS are covered by credits; the model calls are not, until you move
+them to Vertex.
 
-To route inference through Vertex AI, where the credits apply, the fleet needs
-no code change — `google-genai` picks its backend from the environment. On the
-Job and the ops console, drop the secret and set three variables instead:
+### You do not need a JSON key. Please do not create one.
 
-```bash
-  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=$REGION,FREIGHT_MODEL=gemini-3.7-flash"
-```
+This is the part worth being clear about, because a service-account JSON key is
+the intuitive answer and it is the wrong one in both places you need
+credentials:
 
-and give the service account Vertex access:
+- **On Cloud Run**, the service account you already attach with
+  `--service-account "$SA"` *is* the identity. The container gets tokens from
+  the metadata server automatically. A key file would add a long-lived secret
+  that has to be stored, mounted and rotated, in exchange for nothing.
+- **On your laptop**, `gcloud auth application-default login` writes
+  short-lived user credentials that the SDK finds the same way. Also no file to
+  guard.
+
+A JSON key is a permanent credential that works from anywhere it is copied to,
+including a public repo, a Docker layer or a screen-shared terminal. It is the
+single most common way cloud projects get compromised, and nothing in this
+deployment needs one. `GOOGLE_APPLICATION_CREDENTIALS` stays unset.
+
+### How the SDK decides — verified against the installed library
+
+`google-genai` picks its backend from the environment, so **no code in this repo
+changes**; `GOOGLE_API_KEY` appears nowhere in `src/` except one docstring. The
+resolution order below is read from `google/genai/_api_client.py` in this repo's
+own venv, not from memory:
+
+| Variable | Effect |
+|---|---|
+| `GOOGLE_GENAI_USE_VERTEXAI` | `true`/`1` (case-insensitive) switches to Vertex |
+| `GOOGLE_CLOUD_PROJECT` | the project; if unset, taken from ADC |
+| `GOOGLE_CLOUD_LOCATION` | the endpoint; **if unset, the SDK defaults to `global`** |
+
+With Vertex on and no api_key, the client calls
+`google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])`
+— that is ADC, and that is why the attached service account is enough.
+
+**Unset `GOOGLE_API_KEY` when you switch.** With both set, the SDK applies a
+precedence rule (env project/location wins over env api_key) and logs which one
+it chose. It will probably do what you want, but "probably" is a bad property
+for a billing path — remove the key so there is only one answer.
+
+### One-time project setup
 
 ```bash
 gcloud services enable aiplatform.googleapis.com
+
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:$SA" --role "roles/aiplatform.user"
+  --member "serviceAccount:$SA" \
+  --role "roles/aiplatform.user"
 ```
 
-**Verify this with one real call before you rely on it.** Two things differ
-between the backends and neither is guaranteed by this document: the exact model
-identifier Vertex publishes for Gemini 3.7 Flash may not be the bare
-`gemini-3.7-flash` string the Developer API accepts, and the model must be
-available in the region you picked. Run the smoke test in §8
-after switching; if it fails on the model name, set `FREIGHT_MODEL` to whatever
-`gcloud ai models list --region "$REGION"` reports rather than guessing.
+`roles/aiplatform.user` is what lets the service account call models. It does
+not grant it the ability to create or delete Vertex resources.
 
-Keeping the AI Studio key is a perfectly reasonable choice for a hackathon — the
-whole eval suite costs cents. Switch only if you actually want the credits to
-absorb it.
+### Test it locally first
+
+Do this before redeploying anything — it is a 60-second check that separates
+"my flags are wrong" from "my deployment is wrong":
+
+```bash
+gcloud auth application-default login          # ADC on your laptop
+gcloud config set project "$PROJECT_ID"
+
+unset GOOGLE_API_KEY                            # only one billing path at a time
+export GOOGLE_GENAI_USE_VERTEXAI=TRUE
+export GOOGLE_CLOUD_PROJECT="$PROJECT_ID"
+export GOOGLE_CLOUD_LOCATION=global
+
+.venv/bin/python -c "
+from google import genai
+c = genai.Client()
+print('backend vertexai =', c._api_client.vertexai)
+print(c.models.generate_content(model='gemini-3.7-flash',
+      contents='Reply with exactly: VERTEX OK').text)
+"
+```
+
+If that prints `VERTEX OK`, the whole fleet works — every agent goes through the
+same client. Then prove it end to end on one shipment:
+
+```bash
+FREIGHT_WORKSPACE_ROOT=$PWD/workspace .venv/bin/python eval/run_eval.py
+```
+
+**If it fails on the model name**, that is the one thing this document cannot
+promise, because the identifier Vertex publishes can differ from the Developer
+API's and can vary by endpoint. Do not guess — ask:
+
+```bash
+gcloud ai models list --region us-central1 | grep -i gemini
+```
+
+and set `FREIGHT_MODEL` to what it reports. If a regional endpoint is required
+for the model, set `GOOGLE_CLOUD_LOCATION` to that region instead of `global`.
+Whatever you end up with, **re-run the eval before the demo** — a model swap is
+a behaviour change, and the 7/7 in the README was measured on the Developer API.
+If the score moves, that is a finding to report, not a number to quietly update.
+
+### Deploy with it
+
+The sweep Job (§5) and the private ops console (§4a) are the only two that call
+models. Swap `--set-secrets` for the Vertex variables in both:
+
+```bash
+gcloud run jobs update "$JOB" --region "$REGION" \
+  --clear-secrets \
+  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FREIGHT_MODEL=gemini-3.7-flash"
+```
+
+```bash
+gcloud run services update "$OPS" --region "$REGION" \
+  --clear-secrets \
+  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FREIGHT_MODEL=gemini-3.7-flash"
+```
+
+Two things to watch. `--set-env-vars` **replaces the entire set**, so anything
+you set earlier (including the `FREIGHT_LEDGER_PATH` pair from §4b) must be
+repeated in the same flag or it is dropped — use `--update-env-vars` instead if
+you would rather merge. And `--clear-secrets` is what actually removes the AI
+Studio key; without it the key stays mounted and you are back to two billing
+paths.
+
+The **public** console (§4) needs none of this. It calls no model, so it takes
+no credentials of either kind.
+
+### Then delete the key
+
+Once the eval passes on Vertex, the AI Studio key is an unused credential with
+live billing attached:
+
+```bash
+gcloud secrets delete gemini-api-key            # after the eval passes, not before
+```
+
+and revoke it in AI Studio. An unused key that still works is the one nobody
+notices has leaked.
 
 ---
 
@@ -632,7 +752,11 @@ gcloud run services proxy "$SERVICE" --region "$REGION"   # then use localhost:8
 | Console shows an empty desk right after the sweep held drafts | Job and Service have separate filesystems | Mount one bucket into both — §4b. This is the most common cloud-only failure. |
 | `POST /decision/.../approve` returns 302 on the public URL | `FREIGHT_CONSOLE_READONLY` not set | Redeploy §4 with the flag; verify with §8 step 4 before demoing. |
 | `reconcile.json` says `diverged: true` on a fresh deploy | Console and Job reading different paths | Check both carry the same `FREIGHT_LEDGER_PATH` / `FREIGHT_APPROVALS_PATH`. |
-| 404 or `model not found` after switching to Vertex | Model id or region differs on Vertex | See §7a — set `FREIGHT_MODEL` from `gcloud ai models list`, do not guess. |
+| 404 or `model not found` after switching to Vertex | Model id or endpoint differs on Vertex | See §7a — set `FREIGHT_MODEL` from `gcloud ai models list`; try `GOOGLE_CLOUD_LOCATION=global` before a region. |
+| `Could not resolve project using application default credentials` | No ADC on the machine | Locally: `gcloud auth application-default login`. On Cloud Run: the service was deployed without `--service-account`. |
+| `403 Permission denied` on a Vertex call | Service account lacks the role | `roles/aiplatform.user` on `$SA` — §7a. Also check `aiplatform.googleapis.com` is enabled. |
+| SDK logs that it chose one credential over another | Both `GOOGLE_API_KEY` and Vertex vars are set | Expected precedence, but ambiguous billing. `--clear-secrets` on the Job and ops console. |
+| Env vars you set earlier vanished after an update | `--set-env-vars` replaces the whole set | Repeat them all in one flag, or use `--update-env-vars` to merge. |
 | Agent answers "not found" for every document | Workspace never seeded | The image must contain `fixtures/`; check `.dockerignore` does not exclude it. |
 | `Failed to create database engine` | A sync SQLite URL | Async driver required: `sqlite+aiosqlite:///...`, not `sqlite:///...`. |
 | Sweep job succeeds but writes files | Gate bypassed — **stop and investigate** | This must be impossible; `outbox/` should be empty after a sweep. Read the ledger before deploying further. |
