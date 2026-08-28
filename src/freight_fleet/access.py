@@ -50,6 +50,7 @@ from urllib.parse import parse_qsl, quote, urlencode
 
 COOKIE = "fleet_access"
 FORM_PATH = "/access"
+HOME = "/chat"  # where a login lands when it was not interrupted on its way somewhere
 TTL_SECONDS = 7 * 24 * 3600
 MAX_FAILURES = 5
 FAILURE_WINDOW = 15 * 60
@@ -224,7 +225,7 @@ class AccessCodeMiddleware:
 
         client = _client(scope)
         if self._limited(client):
-            await _page(send, 429, _form_html(self.mode, "/", "Too many attempts. Try again in fifteen minutes."))
+            await _page(send, 429, _form_html(self.mode, HOME, "Too many attempts. Try again in fifteen minutes."))
             return
 
         raw = (await _read(receive)).decode("utf-8", "replace")
@@ -272,8 +273,8 @@ def _safe_next(value: str | None) -> str:
     """Only a same-origin path may follow a login. `//host` is a protocol-relative
     URL and a backslash variant is what some browsers make of it; both are refused."""
     if not value or not value.startswith("/") or value.startswith(("//", "/\\")):
-        return "/"
-    return value
+        return HOME
+    return value if value != "/" else HOME
 
 
 def _form_url(target: str) -> str:

@@ -163,7 +163,7 @@ def test_the_wrong_code_is_a_403_with_no_cookie():
 def test_next_cannot_leave_the_origin():
     gate = AccessCodeMiddleware(EchoApp(), CODE)
     for evil in ("https://evil.example/", "//evil.example", "/\\evil.example", ""):
-        assert header(login(gate, CODE, evil), b"location") == "/"
+        assert header(login(gate, CODE, evil), b"location") == "/chat"
 
 
 # --- the cookie --------------------------------------------------------------

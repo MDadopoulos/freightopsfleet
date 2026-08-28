@@ -307,6 +307,15 @@ def create_app() -> Any:
         bind_host="0.0.0.0",
         port=port,
     )
+    # The judge-facing chat page, on the same app so cookies, IAP and the
+    # gate cover it with no new rule. ADK's own UI stays at /dev-ui/.
+    if hasattr(app, "add_api_route"):
+        from fastapi.responses import HTMLResponse
+
+        from .chatui import page
+
+        app.add_api_route("/chat", lambda: HTMLResponse(page()), methods=["GET"], include_in_schema=False)
+
     # Order matters: IAP identity outermost, so an anonymous request is refused
     # before it can even see the access form; the code gate inside, so only a
     # signed-in visitor gets to spend a guess.

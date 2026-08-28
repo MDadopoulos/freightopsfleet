@@ -180,10 +180,12 @@ runs it — the scoreboard grades the canonical markdown, which does not move.
 
 ## Ask the fleet
 
-The chat surface is ADK's dev UI behind Google sign-in — a judge can ask the
-fleet something rather than only reading what it already did.
+The chat surface is one page, `/chat`, in front of ADK's API — a judge can ask
+the fleet something rather than only reading what it already did, watch it
+hand work to a desk, and see a draft stop at the gate. ADK's own developer UI
+stays reachable at `/dev-ui/` as a trace view.
 
-**Live URL:** `https://freight-ops-chat-819664522984.europe-west1.run.app`
+**Live URL:** `https://freight-ops-chat-819664522984.europe-west1.run.app/chat`
 
 **You will be asked to sign in with a Google account.** That is not
 bureaucracy: it is the only surface where a visitor's click spends model
@@ -203,7 +205,7 @@ time as a **demo login** — username and password from the submission, no Googl
 involved. Each username is its own identity with its own durable history, and the
 credentials are retired after judging.
 
-**Demo login URL:** `https://freight-ops-chat-demo-819664522984.europe-west1.run.app`
+**Demo login URL:** `https://freight-ops-chat-demo-819664522984.europe-west1.run.app/chat`
 
 Either way, ask about a *named* shipment or folder, as the table does. A question
 that would need every shipment cross-checked ("which one has the most
