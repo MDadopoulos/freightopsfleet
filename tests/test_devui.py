@@ -354,3 +354,23 @@ def test_create_app_without_an_audience_falls_back_to_the_cli_default(monkeypatc
 
     assert app.audience is None
     assert recorded["session_service_uri"] == "sqlite+aiosqlite:///./data/sessions.db"
+
+
+def test_after_the_rewritten_body_the_channel_defers_to_the_client_not_a_fake_disconnect():
+    """ADK polls receive() during a run to detect a departed client. The
+    replacement channel must answer that poll with whatever the real client
+    channel says — never with a fabricated `http.disconnect`, which aborted
+    every turn with a 499 in production."""
+    from freight_fleet.devui import _rewrite_body
+
+    inbound = [{"type": "http.request", "body": b'{"user_id": "x"}', "more_body": False},
+               {"type": "custom.still-connected"}]
+
+    async def original():
+        return inbound.pop(0)
+
+    scope = http_scope("/run", method="POST")
+    replacement = asyncio.run(_rewrite_body(scope, original, EMAIL))
+    first = asyncio.run(replacement())
+    assert json.loads(first["body"])["user_id"] == EMAIL
+    assert asyncio.run(replacement()) == {"type": "custom.still-connected"}

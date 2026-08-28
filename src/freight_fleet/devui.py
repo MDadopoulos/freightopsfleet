@@ -239,7 +239,7 @@ async def _rewrite_body(
         message = await receive()
         if message["type"] != "http.request":
             # A disconnect mid-body: replay it and let the app unwind.
-            return _replay(message)
+            return _replay(message, receive)
         chunks.append(message.get("body", b""))
         more = message.get("more_body", False)
     body = b"".join(chunks)
@@ -258,17 +258,25 @@ async def _rewrite_body(
         kept = [(k, v) for k, v in scope.get("headers", ()) if k.lower() != b"content-length"]
         scope["headers"] = [*kept, (b"content-length", str(len(body)).encode())]
 
-    return _replay({"type": "http.request", "body": body, "more_body": False})
+    return _replay({"type": "http.request", "body": body, "more_body": False}, receive)
 
 
-def _replay(message: dict) -> Callable[[], Awaitable[dict]]:
-    """A receive channel that yields `message` once, then reports a disconnect."""
+def _replay(message: dict, then: Callable[[], Awaitable[dict]]) -> Callable[[], Awaitable[dict]]:
+    """A receive channel that yields `message` once, then defers to `then`.
+
+    `then` is the ORIGINAL channel, not a fabricated disconnect. ADK's `/run`
+    polls the channel while the agent works to notice a client that walked
+    away; a channel that answers `http.disconnect` to that poll aborts every
+    turn about 200 ms in with a 499 and "Client disconnected". The original
+    channel blocks until the client actually leaves, which is the answer the
+    poll is designed to time out against.
+    """
     sent = False
 
     async def receive() -> dict:
         nonlocal sent
         if sent:
-            return {"type": "http.disconnect"}
+            return await then()
         sent = True
         return message
 
