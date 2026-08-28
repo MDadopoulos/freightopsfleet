@@ -38,6 +38,9 @@ Environment:
   the UI's self-asserted user id stands. Never leave it unset in a deployment.
 * `FREIGHT_CHAT_ACCESS_CODE` — the invite code a visitor must enter once after
   signing in (`access.py`). UNSET means local development: no gate.
+* `FREIGHT_CHAT_USERS` — JSON of `{username: scrypt-hash}` for the DEMO LOGIN
+  surface (`access.py`): a second deployment with no IAP, where the username
+  becomes the session identity. Made by `python -m freight_fleet.cli chat-users`.
 * `FREIGHT_SESSIONS_DB` — session store URI (default local SQLite).
 * `FREIGHT_AGENTS_DIR` — the ADK app directory (default `/app/agents`, the
   image's copy of `deploy/agents/`).
@@ -149,22 +152,32 @@ class IapIdentityMiddleware:
             await _refuse(scope, receive, send)
             return
 
-        scope = dict(scope)
-        path: str = scope.get("path", "")
-        quoted = quote(email, safe="")
-        scope["path"] = _USER_SEGMENT.sub(quoted, path)
-        raw_path = scope.get("raw_path")
-        if raw_path:
-            rewritten = _USER_SEGMENT.sub(quoted, raw_path.decode("latin-1"))
-            scope["raw_path"] = rewritten.encode("latin-1")
-
-        if path.endswith(_QUERY_ROUTES):
-            scope["query_string"] = _with_user_id(scope.get("query_string", b""), email)
-
-        if scope["type"] == "http" and scope.get("method") == "POST" and path.endswith(_BODY_ROUTES):
-            receive = await _rewrite_body(scope, receive, email)
-
+        scope, receive = await pin_identity(scope, receive, email)
         await self.app(scope, receive, send)
+
+
+async def pin_identity(scope: dict, receive: Callable, identity: str) -> tuple[dict, Callable]:
+    """Overwrite every `user_id` a request carries with `identity`.
+
+    Shared by the IAP layer (identity = the signed email) and the demo login
+    (identity = the username), so both surfaces scope sessions the same way and
+    a fix to one route pattern fixes both.
+    """
+    scope = dict(scope)
+    path: str = scope.get("path", "")
+    quoted = quote(identity, safe="")
+    scope["path"] = _USER_SEGMENT.sub(quoted, path)
+    raw_path = scope.get("raw_path")
+    if raw_path:
+        rewritten = _USER_SEGMENT.sub(quoted, raw_path.decode("latin-1"))
+        scope["raw_path"] = rewritten.encode("latin-1")
+
+    if path.endswith(_QUERY_ROUTES):
+        scope["query_string"] = _with_user_id(scope.get("query_string", b""), identity)
+
+    if scope["type"] == "http" and scope.get("method") == "POST" and path.endswith(_BODY_ROUTES):
+        receive = await _rewrite_body(scope, receive, identity)
+    return scope, receive
 
 
 def _header(scope: dict, name: bytes) -> str | None:
@@ -289,9 +302,13 @@ def create_app() -> Any:
     # Order matters: IAP identity outermost, so an anonymous request is refused
     # before it can even see the access form; the code gate inside, so only a
     # signed-in visitor gets to spend a guess.
-    from .access import AccessCodeMiddleware
+    from .access import AccessCodeMiddleware, load_users
 
-    gated = AccessCodeMiddleware(app, code=os.environ.get("FREIGHT_CHAT_ACCESS_CODE"))
+    gated = AccessCodeMiddleware(
+        app,
+        code=os.environ.get("FREIGHT_CHAT_ACCESS_CODE"),
+        users=load_users(os.environ.get("FREIGHT_CHAT_USERS")),
+    )
     return IapIdentityMiddleware(gated, audience=os.environ.get("FREIGHT_IAP_AUDIENCE"))
 
 

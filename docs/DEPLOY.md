@@ -964,6 +964,41 @@ the same convention `FREIGHT_IAP_AUDIENCE` follows for local development.
 
 ---
 
+### The demo login — for visitors who would rather not sign in
+
+Some judges will not want their Google account in a stranger's database, and
+that is a reasonable position. So the same gate has a second mode and the same
+image runs a second time, **without IAP**, where the username is the identity:
+
+```bash
+# mint the credentials: prints the JSON for the secret AND the passwords, once
+python -m freight_fleet.cli chat-users judge1 judge2 judge3 > chat-users.txt
+# store the JSON half as the secret; keep the passwords half for the submission form
+sed -n '/^{/,/^}/p' chat-users.txt | gcloud secrets create freight-chat-users --replication-policy=automatic --data-file=-
+gcloud secrets add-iam-policy-binding freight-chat-users --member "serviceAccount:$SA" --role roles/secretmanager.secretAccessor
+
+export CHAT_DEMO=freight-ops-chat-demo
+gcloud run deploy "$CHAT_DEMO" --region "$REGION" --image "$IMAGE" --service-account "$SA"   --command sh --args="-c,uvicorn freight_fleet.devui:app_factory --factory --host 0.0.0.0 --port \${PORT:-8080}"   --add-cloudsql-instances "$PROJECT_ID:$REGION:freight-sessions"   --set-secrets FREIGHT_SESSIONS_DB=freight-sessions-uri:latest,FREIGHT_CHAT_USERS=freight-chat-users:latest   --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_AGENTS_DIR=/app/agents"   --memory 1Gi --cpu 1 --timeout 600 --max-instances 1 --min-instances 0 --concurrency 4   --allow-unauthenticated
+gcloud run services update "$SERVICE" --region "$REGION"   --update-env-vars "FREIGHT_CHAT_DEMO_URL=$(gcloud run services describe "$CHAT_DEMO" --region "$REGION" --format='value(status.url)')"
+```
+
+No `FREIGHT_IAP_AUDIENCE` and no access code: `FREIGHT_CHAT_USERS` alone selects
+the mode. Passwords are scrypt hashes in the secret and nowhere else; the login
+pins `user_id` to the username through the same helper IAP uses, so `judge1`
+and `judge2` never see each other's sessions, and `--allow-unauthenticated` is
+safe because the gate refuses everything but the form until a login succeeds.
+Rotate by minting again — a new table is a new signing key, so every cookie
+dies with the old passwords. Both chat services share the database: an email
+and a username are different identities, so nothing collides.
+
+Why not only this, then? Because it is a shared secret handed around, and the
+project's own §4a says what that costs. Google sign-in remains the surface with
+real identities and an audit log; the demo login is the courtesy exit for a
+visitor who declines it. Offer both, say which is which, and retire the demo
+credentials when judging ends.
+
+---
+
 ## 5. Deploy the sweep as a Job
 
 The sweep is not a web request — it is a scheduled batch run that must exit.

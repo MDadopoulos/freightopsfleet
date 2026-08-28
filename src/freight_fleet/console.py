@@ -156,6 +156,9 @@ def _surfaces() -> tuple[str, list[tuple[str, str, str]]]:
     chat = os.environ.get("FREIGHT_CHAT_URL", "").strip()
     if chat:
         links.append(("Ask the fleet", chat, "Google sign-in + access code"))
+    demo = os.environ.get("FREIGHT_CHAT_DEMO_URL", "").strip()
+    if demo:
+        links.append(("Ask the fleet", demo, "demo login, no Google account"))
     repo = os.environ.get("FREIGHT_REPO_URL", "").strip()
     if repo:
         links.append(("Source", repo, "the repo"))
@@ -1502,8 +1505,13 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
             f'and every one lands in the <a href="/ledger">ledger</a>.{sandbox_line}</li>'
             + (
                 f'<li>Want to ask the fleet something yourself? <a href="{esc(chat)}">Ask the fleet</a> '
-                "— sign in with any Google account, then enter the access code from the submission. "
-                "Your conversation is yours alone and survives a reload.</li>"
+                "— sign in with any Google account, then enter the access code from the submission"
+                + (
+                    f', or use the <a href="{esc(demo)}">demo login</a> from the submission if you would '
+                    "rather not sign in"
+                    if (demo := os.environ.get("FREIGHT_CHAT_DEMO_URL", "").strip()) else ""
+                )
+                + ". Your conversation is yours alone and survives a reload.</li>"
                 if (chat := os.environ.get("FREIGHT_CHAT_URL", "").strip()) else ""
             )
             + "</ol></div>"

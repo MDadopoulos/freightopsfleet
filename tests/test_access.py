@@ -240,3 +240,91 @@ def test_the_form_points_visitors_without_a_code_somewhere_useful(monkeypatch):
     monkeypatch.delenv("FREIGHT_PUBLIC_URL")
     monkeypatch.delenv("FREIGHT_SANDBOX_URL")
     assert "No code?" not in drive(AccessCodeMiddleware(EchoApp(), CODE), scope("/access"))[1]["body"].decode()
+
+
+# --- demo login (users mode) -------------------------------------------------
+
+from freight_fleet.access import hash_password, load_users, mint_users, verify_password
+
+
+def users_gate(inner=None, clock=None):
+    table, passwords = mint_users(["Judge1", "judge2"])
+    kw = {"clock": clock} if clock else {}
+    return AccessCodeMiddleware(inner or EchoApp(), users=table, **kw), passwords
+
+
+def user_login(gate, username, password, nxt="/dev-ui/"):
+    form = f"username={quote(username)}&password={quote(password)}&next={quote(nxt, safe='')}".encode()
+    return drive(gate, scope("/access", method="POST"), form)
+
+
+def test_password_hashes_verify_and_are_salted():
+    h1, h2 = hash_password("s3cret"), hash_password("s3cret")
+    assert h1 != h2 and h1.startswith("scrypt$")
+    assert verify_password("s3cret", h1) and not verify_password("S3cret", h1)
+    assert not verify_password("s3cret", "garbage") and not verify_password("x", "md5$a$b$c$d$e")
+
+
+def test_load_users_normalizes_names_and_rejects_nonsense():
+    assert load_users(None) is None and load_users("  ") is None
+    assert load_users('{" Judge1 ": "scrypt$x"}') == {"judge1": "scrypt$x"}
+    for bad in ("[]", "{}", '"str"'):
+        try:
+            load_users(bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+
+
+def test_users_mode_form_asks_for_username_and_password():
+    gate, _ = users_gate()
+    page = drive(gate, scope("/access"))[1]["body"].decode()
+    assert gate.mode == "users"
+    assert 'name="username"' in page and 'name="password"' in page and 'name="code"' not in page
+    assert "<script" not in page
+
+
+def test_users_mode_refuses_wrong_password_and_unknown_user_alike():
+    gate, pw = users_gate()
+    assert status(user_login(gate, "judge1", pw["judge1"] + "x")) == 403
+    assert status(user_login(gate, "nobody", pw["judge1"])) == 403
+    assert status(drive(gate, scope("/run", method="POST"), b"{}")) == 403
+
+
+def test_users_mode_login_pins_the_username_into_every_user_id():
+    inner = EchoApp()
+    gate, pw = users_gate(inner)
+    sent = user_login(gate, " JUDGE1 ", pw["judge1"])
+    assert status(sent) == 303
+    jar = cookie_from(sent).encode()
+
+    class Recorder(EchoApp):
+        async def __call__(self, sc, receive, send):
+            self.seen = sc
+            msg = await receive()
+            self.body = msg.get("body", b"")
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+    rec = Recorder()
+    gate.app = rec
+    sc = scope("/apps/freight_ops/users/whatever/sessions", headers=[(b"cookie", jar)])
+    drive(gate, sc)
+    assert rec.seen["path"] == "/apps/freight_ops/users/judge1/sessions"
+    drive(gate, scope("/run", method="POST", headers=[(b"cookie", jar)]), b'{"user_id": "spoof"}')
+    assert json.loads(rec.body)["user_id"] == "judge1"
+
+
+def test_users_cookie_is_bound_to_the_user_table():
+    gate, pw = users_gate()
+    jar = cookie_from(user_login(gate, "judge1", pw["judge1"]))
+    forged = jar.replace("judge1.", "judge2.", 1)
+    assert status(drive(gate, scope("/dev-ui/", headers=[(b"cookie", forged.encode())]))) == 303
+    rotated, _ = users_gate()  # a new table: different key, every old cookie dies
+    assert status(drive(rotated, scope("/dev-ui/", headers=[(b"cookie", jar.encode())]))) == 303
+
+
+def test_a_code_is_ignored_when_users_are_configured():
+    table, _ = mint_users(["judge1"])
+    gate = AccessCodeMiddleware(EchoApp(), code="FLEET-1", users=table)
+    assert gate.mode == "users" and gate.code is None

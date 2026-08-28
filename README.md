@@ -198,6 +198,11 @@ sign-in says who you are; the code says you were invited. It is the only thing
 standing between any Google account on earth and the fleet's model budget, so it
 is rotated after judging and never appears in this repo.
 
+**Would rather not sign in with a Google account?** The same chat runs a second
+time as a **demo login** — username and password from the submission, no Google
+involved. Each username is its own identity with its own durable history, and the
+credentials are retired after judging.
+
 Eight questions worth asking, in the order that makes the argument:
 
 | Ask | Desk it exercises | What to look for |

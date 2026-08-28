@@ -538,6 +538,26 @@ def cmd_console(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chat_users(args: argparse.Namespace) -> int:
+    """Mint demo-login credentials for the chat surface (DEPLOY.md §4d).
+
+    Prints the `{username: scrypt-hash}` table that becomes the FREIGHT_CHAT_USERS
+    secret, then the passwords ONCE, as comments, for the submission form. The
+    passwords exist nowhere else: this command is the only time they are plain.
+    """
+    import json
+
+    from .access import mint_users
+
+    table, passwords = mint_users(args.usernames)
+    print(json.dumps(table, indent=2))
+    print()
+    print("# passwords — shown once, for the submission form only:")
+    for user, password in passwords.items():
+        print(f"#   {user}: {password}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """`argv` is a parameter so the tests can drive a whole command in-process
     (`main(["ingest", "--dry-run"])`) instead of asserting on a subprocess's
@@ -576,6 +596,10 @@ def main(argv: list[str] | None = None) -> int:
     p_ingest.add_argument("--model", default=os.environ.get("FREIGHT_MODEL", "gemini-3.7-flash"),
                           help="Gemini model that transcribes each document (default: $FREIGHT_MODEL)")
     p_ingest.set_defaults(fn=cmd_ingest)
+
+    p_users = sub.add_parser("chat-users", help="mint demo-login credentials for the chat surface")
+    p_users.add_argument("usernames", nargs="+", help="e.g. judge1 judge2 judge3")
+    p_users.set_defaults(fn=cmd_chat_users)
 
     p_console = sub.add_parser("console", help="serve the operator console (no credentials)")
     p_console.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
