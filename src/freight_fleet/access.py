@@ -262,5 +262,21 @@ def _form_html(nxt: str, message: str) -> str:
         '<button type="submit">Continue</button></form>'
         '<p class="meta">Every shipment here is fictional. Conversations are stored so they can be '
         "resumed; see the privacy page on the public console.</p>"
+        f"{_elsewhere()}"
         "</div></body></html>"
     )
+
+
+def _elsewhere() -> str:
+    """Links back to the surfaces that need no code, so a visitor without one is
+    not stranded on this form. Read from env at render time, like the rest."""
+    import os
+
+    parts = []
+    for label, var in (("the public desk", "FREIGHT_PUBLIC_URL"), ("the sandbox", "FREIGHT_SANDBOX_URL")):
+        url = os.environ.get(var, "").strip()
+        if url:
+            parts.append(f'<a href="{html.escape(url, quote=True)}">{label}</a>')
+    if not parts:
+        return ""
+    return f'<p class="meta">No code? {" and ".join(parts)} need none.</p>'

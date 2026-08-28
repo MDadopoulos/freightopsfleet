@@ -461,3 +461,33 @@ def test_privacy_page_is_public_static_and_true(monkeypatch):
     assert "<script" not in r.text
     # discoverable from every footer, not only from the consent screen
     assert 'href="/privacy"' in TestClient(console.app).get("/").text
+
+
+def test_surface_switcher_says_where_you_are_and_where_else_to_go(monkeypatch):
+    """Every surface names itself and links the others, from env alone. Without
+    the env there is no strip: a local operator has nowhere else to go."""
+    from freight_fleet import console
+
+    for var in ("FREIGHT_PUBLIC_URL", "FREIGHT_SANDBOX_URL", "FREIGHT_CHAT_URL", "FREIGHT_REPO_URL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("FREIGHT_CONSOLE_MODE", raising=False)
+    monkeypatch.setenv("FREIGHT_CONSOLE_READONLY", "1")
+    assert 'class="surfaces"' not in TestClient(console.app).get("/").text
+
+    monkeypatch.setenv("FREIGHT_SANDBOX_URL", "https://sandbox.test")
+    monkeypatch.setenv("FREIGHT_CHAT_URL", "https://chat.test")
+    monkeypatch.setenv("FREIGHT_REPO_URL", "https://github.test/repo")
+    page = TestClient(console.app).get("/").text
+    assert "You are on <strong>Public desk" in page
+    assert 'href="https://sandbox.test"' in page and 'href="https://chat.test"' in page
+    assert "Google sign-in + access code" in page
+    assert "Want to ask the fleet something yourself?" in page, "the brief gets a fourth step"
+
+    # The real sandbox is writable: a read-only sandbox is not a deployment.
+    monkeypatch.delenv("FREIGHT_CONSOLE_READONLY")
+    monkeypatch.setenv("FREIGHT_CONSOLE_MODE", "sandbox")
+    monkeypatch.setenv("FREIGHT_PUBLIC_URL", "https://public.test")
+    page = TestClient(console.app).get("/").text
+    assert "You are on <strong>Sandbox" in page
+    assert 'href="https://sandbox.test"' not in page, "a surface never links to itself"
+    assert "← public desk" in page and "ask the fleet →" in page, "the ribbon links out"

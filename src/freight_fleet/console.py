@@ -136,6 +136,32 @@ def _mode() -> str:
     return os.environ.get("FREIGHT_CONSOLE_MODE", "").strip().lower()
 
 
+def _surfaces() -> tuple[str, list[tuple[str, str, str]]]:
+    """Where a visitor is, and where else they can go — (label, url, note) per
+    other surface, from env, so the switcher is one more thing the operator TELLS
+    the console rather than something it discovers. Empty list: no switcher."""
+    if _mode() == "sandbox":
+        here = "Sandbox — a disposable copy, buttons live"
+    elif _readonly():
+        here = "Public desk — read-only"
+    else:
+        here = "Operator console — decisions are real"
+    links: list[tuple[str, str, str]] = []
+    public = os.environ.get("FREIGHT_PUBLIC_URL", "").strip()
+    if public and (_mode() == "sandbox" or not _readonly()):
+        links.append(("Public desk", public, "read-only, for anyone"))
+    sb = _sandbox_url()
+    if sb and _mode() != "sandbox":
+        links.append(("Sandbox", sb, "buttons live on a disposable copy"))
+    chat = os.environ.get("FREIGHT_CHAT_URL", "").strip()
+    if chat:
+        links.append(("Ask the fleet", chat, "Google sign-in + access code"))
+    repo = os.environ.get("FREIGHT_REPO_URL", "").strip()
+    if repo:
+        links.append(("Source", repo, "the repo"))
+    return here, links
+
+
 def _sandbox_url() -> str:
     """Where the disposable-copy console lives, if the operator deployed one.
     Set on the read-only surface so its refusals can point somewhere a visitor
@@ -604,7 +630,16 @@ hr{border:0;border-top:1px solid var(--line);margin:24px 0}
 .ribbon{border-bottom:1px solid var(--line);background:var(--held-tint);color:var(--held);
      padding:10px 20px;text-align:center;font:700 13px/1.5 var(--sans);
      letter-spacing:.08em;text-transform:uppercase}
-.ribbon a{color:inherit}
+.ribbon a{color:inherit;margin-left:10px}
+.surfaces{background:var(--sunk);border-bottom:1px solid var(--line)}
+.surfaces .in{max-width:920px;margin-inline:auto;padding:8px 20px;display:flex;flex-wrap:wrap;
+     gap:6px 10px;align-items:center;font:500 13.5px/1.4 var(--sans);color:var(--ink-2)}
+.surfaces .here{margin-right:6px}
+.surfaces a{display:inline-flex;align-items:center;min-height:32px;padding:0 10px;border-radius:999px;
+     border:1px solid var(--line);background:var(--surface);color:var(--ink);text-decoration:none;
+     font-weight:600;transition:border-color 120ms ease}
+.surfaces a:hover{border-color:var(--accent)}
+.surfaces .note{font-weight:400;color:var(--ink-3);margin:0 4px}
 .brief{margin:24px 0 0;border:1px solid var(--line);border-left:6px solid var(--accent);
      border-radius:12px;background:var(--surface);padding:20px 20px 12px}
 .brief ol{margin:10px 0 0;padding-left:24px}
@@ -689,8 +724,13 @@ def _shell(title: str, body: str, *, active: str = "", pending: int = 0,
                   f'approval store">⚠ {stranded}</span>')
     ribbon = ""
     if _mode() == "sandbox":
+        public = os.environ.get("FREIGHT_PUBLIC_URL", "").strip()
+        chat = os.environ.get("FREIGHT_CHAT_URL", "").strip()
         ribbon = ('<div class="ribbon">Sandbox — a disposable copy of the record. Approve and '
-                  "reject are live here; nothing decided in it reaches the governed desk.</div>")
+                  "reject are live here; nothing decided in it reaches the governed desk."
+                  + (f'<a href="{esc(public)}">← public desk</a>' if public else "")
+                  + (f'<a href="{esc(chat)}">ask the fleet →</a>' if chat else "")
+                  + "</div>")
     nav = (
         ribbon
         + '<div class="nav"><div class="in">'
@@ -702,6 +742,17 @@ def _shell(title: str, body: str, *, active: str = "", pending: int = 0,
         + link("/evidence", "Evidence", "evidence")
         + "</span></div></div>"
     )
+    here, others = _surfaces()
+    if others:
+        nav += (
+            '<div class="surfaces"><div class="in">'
+            f'<span class="here">You are on <strong>{esc(here)}</strong></span>'
+            + "".join(
+                f'<a href="{esc(url)}">{esc(label)} <span class="note">· {esc(note)}</span> →</a>'
+                for label, url, note in others
+            )
+            + "</div></div>"
+        )
     foot = (
         '<div class="foot"><p>This console reads records. It never calls a model, and it ships '
         "zero lines of JavaScript. The fleet runs from the CLI and the scheduled sweep "
@@ -1449,7 +1500,13 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
             "<li>Try Approve. This public surface refuses with a 403 — it is deployed so it "
             "<em>cannot</em> decide; decisions happen on the operator's authenticated console, "
             f'and every one lands in the <a href="/ledger">ledger</a>.{sandbox_line}</li>'
-            "</ol></div>"
+            + (
+                f'<li>Want to ask the fleet something yourself? <a href="{esc(chat)}">Ask the fleet</a> '
+                "— sign in with any Google account, then enter the access code from the submission. "
+                "Your conversation is yours alone and survives a reload.</li>"
+                if (chat := os.environ.get("FREIGHT_CHAT_URL", "").strip()) else ""
+            )
+            + "</ol></div>"
         )
 
     body = (

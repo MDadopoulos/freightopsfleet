@@ -230,3 +230,13 @@ def test_create_app_puts_the_gate_inside_the_iap_layer(monkeypatch):
     app = devui.create_app()
     assert isinstance(app, devui.IapIdentityMiddleware)
     assert isinstance(app.app, AccessCodeMiddleware) and app.app.code == CODE
+
+
+def test_the_form_points_visitors_without_a_code_somewhere_useful(monkeypatch):
+    monkeypatch.setenv("FREIGHT_PUBLIC_URL", "https://public.test")
+    monkeypatch.setenv("FREIGHT_SANDBOX_URL", "https://sandbox.test")
+    page = drive(AccessCodeMiddleware(EchoApp(), CODE), scope("/access"))[1]["body"].decode()
+    assert 'href="https://public.test"' in page and 'href="https://sandbox.test"' in page
+    monkeypatch.delenv("FREIGHT_PUBLIC_URL")
+    monkeypatch.delenv("FREIGHT_SANDBOX_URL")
+    assert "No code?" not in drive(AccessCodeMiddleware(EchoApp(), CODE), scope("/access"))[1]["body"].decode()
