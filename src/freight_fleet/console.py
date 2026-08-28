@@ -707,7 +707,8 @@ def _shell(title: str, body: str, *, active: str = "", pending: int = 0,
         "zero lines of JavaScript. The fleet runs from the CLI and the scheduled sweep "
         '(<code>python -m freight_fleet.cli sweep</code>). The only write it can cause is a gated '
         "replay through <code>before_tool_gate</code>, and every one of those lands in the ledger "
-        "you are reading.</p></div>"
+        'you are reading.</p><p class="meta"><a href="/privacy">Privacy</a> · every shipment, party '
+        "and figure on these pages is fictional.</p></div>"
     )
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -1674,6 +1675,62 @@ def decision(approval_id: str) -> HTMLResponse:
         + '<p style="margin-top:24px"><a href="/">← Back to the desk</a></p>'
     )
     return HTMLResponse(_shell("Decision", body, pending=len(pending), stranded=stranded_count(entries)))
+
+
+# --- privacy -----------------------------------------------------------------
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy() -> HTMLResponse:
+    """What the deployment collects, said plainly.
+
+    Google's OAuth consent screen requires a homepage and a privacy policy
+    before it will admit outside Google accounts to the chat surface, and a
+    policy that is true is cheap to write because the surfaces collect so
+    little: the consoles keep no accounts and set no cookies; the chat learns a
+    Google account email from IAP and stores the conversation so it can be
+    resumed. Nothing here is a model call or a file write; it is one more page
+    the console renders from constants.
+    """
+    contact = os.environ.get("FREIGHT_CONTACT_EMAIL", "mdadopoulos@gmail.com")
+    body = (
+        "<h1>Privacy</h1>"
+        '<p class="lede">Freight Ops Fleet is a demonstration of a governed fleet of freight '
+        "back-office agents, built for a hackathon. Every shipment, company, person, price and "
+        "document on these pages is fictional. This page says what the deployment records about "
+        "<em>you</em>, which is little, and why.</p>"
+        '<p class="meta">Effective 2026-08-28 · applies to the public console, the sandbox and the '
+        '"Ask the fleet" chat.</p>'
+        "<h2>The public console and the sandbox</h2>"
+        "<p>They have no accounts, no sign-in and set no cookies. Like any web service they leave "
+        "standard request logs (IP address, browser user agent, path, time) in Google Cloud "
+        "Logging under Google Cloud's default retention, used only to keep the service running. "
+        "What you click in the sandbox is written to a disposable copy of the record that is "
+        "reset by the operator and never leaves it.</p>"
+        "<h2>The chat (“Ask the fleet”)</h2>"
+        "<p>The chat sits behind Google sign-in (Identity-Aware Proxy). When you sign in, the "
+        "deployment receives the <strong>email address of the Google account you chose</strong> "
+        "and uses it as your identity, so that your conversation is yours alone and can be "
+        "resumed later. Google's own sign-in terms govern the sign-in itself.</p>"
+        "<p>The <strong>messages you type and the replies you receive</strong> are stored in a "
+        "database in the operator's Google Cloud project so the conversation can continue across "
+        "visits. Messages are sent to Google Cloud's Vertex AI (Gemini) to produce the replies, "
+        "under Google Cloud's data-processing terms. Do not type anything you would not want "
+        "kept: the chat is a demonstration, not a confidential channel.</p>"
+        "<h2>What is not done</h2>"
+        "<p>No data is sold, shared with advertisers, or passed to any third party other than "
+        "Google Cloud as the hosting and model provider. No cookies of our own, no tracking "
+        "pixels, no analytics scripts — these pages ship zero JavaScript. Nothing about you "
+        "is used to train a model.</p>"
+        "<h2>Retention and deletion</h2>"
+        "<p>Chat conversations and the sign-in emails attached to them are kept for the "
+        "demonstration period and deleted when the chat service is taken down. To have yours "
+        f'deleted sooner, email <a href="mailto:{esc(contact)}">{esc(contact)}</a> from the '
+        "account you signed in with.</p>"
+        "<h2>Contact</h2>"
+        f'<p>Questions about this page: <a href="mailto:{esc(contact)}">{esc(contact)}</a>.</p>'
+        '<p style="margin-top:24px"><a href="/">← Back to the desk</a></p>'
+    )
+    return HTMLResponse(_shell("Privacy", body, show_footer=False))
 
 
 # --- the two writes ----------------------------------------------------------

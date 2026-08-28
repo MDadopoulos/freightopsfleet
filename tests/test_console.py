@@ -445,3 +445,19 @@ def test_the_schedule_is_escaped_like_any_other_input(world, monkeypatch):
     body = world.client.get("/").text
     assert "<script>alert(1)</script>" not in body
     assert "&lt;script&gt;" in body
+
+
+def test_privacy_page_is_public_static_and_true(monkeypatch):
+    """The OAuth consent screen points at /privacy. It must render with no
+    state at all (no ledger, no store), say what the chat collects, and carry
+    the same zero-JS shell as every other page."""
+    from freight_fleet import console
+
+    monkeypatch.setenv("FREIGHT_CONTACT_EMAIL", "privacy@example.test")
+    r = TestClient(console.app).get("/privacy")
+    assert r.status_code == 200
+    assert "email address of the Google account" in r.text
+    assert "mailto:privacy@example.test" in r.text
+    assert "<script" not in r.text
+    # discoverable from every footer, not only from the consent screen
+    assert 'href="/privacy"' in TestClient(console.app).get("/").text
