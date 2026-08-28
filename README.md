@@ -203,6 +203,12 @@ time as a **demo login** — username and password from the submission, no Googl
 involved. Each username is its own identity with its own durable history, and the
 credentials are retired after judging.
 
+**Demo login URL:** `https://freight-ops-chat-demo-819664522984.europe-west1.run.app`
+
+Either way, ask about a *named* shipment or folder, as the table does. A question
+that would need every shipment cross-checked ("which one has the most
+discrepancies?") is one the coordinator declines rather than guesses at.
+
 Eight questions worth asking, in the order that makes the argument:
 
 | Ask | Desk it exercises | What to look for |
