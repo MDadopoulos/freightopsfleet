@@ -1,0 +1,65 @@
+# The unpaid half of CI: lint, tests, and the fixture seals. Nothing here needs
+# a credential, so it is safe to run on every pull request including one from a
+# fork. The eval that actually calls Gemini lives in a SEPARATE file on purpose
+# (eval.yml, workflow_dispatch + schedule only) — a workflow a PR can trigger
+# must never be able to reach a service account, and the cheapest way to
+# guarantee that is for the two never to share a file.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only, and deliberately NO `id-token: write`. This job has nothing to
+# authenticate to; a token it cannot mint is a token that cannot leak.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is what the python:3.11-slim image runs, 3.12 is what the local
+        # .venv runs. Both are in the matrix because those are the two Pythons
+        # this project is actually executed on, and a `datetime.UTC` or a
+        # tomllib-shaped difference between them should surface here rather
+        # than in a Cloud Run cold start.
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # `render` comes along because `scripts/render_documents.py --check` below
+      # needs fpdf2/pypdfium2/Pillow. It stays an extra rather than a runtime
+      # dependency so the deployed image does not carry it — see pyproject.toml.
+      - name: Install
+        run: python -m pip install -e ".[dev,render]"
+
+      - name: Lint
+        run: python -m ruff check src tests scripts eval
+
+      - name: Tests
+        run: python -m pytest -q
+
+      # The rendered originals under fixtures/raw/ are sealed the same way the
+      # figures in the canonical documents are: they are committed, and this
+      # asserts the committed bytes are what the generator produces today.
+      # If this ever goes red on Linux while it is green on Windows, the fix is
+      # a PIN in pyproject.toml's `render` extra, not a looser comparison — a
+      # seal that tolerates drift is a seal that reports nothing.
+      - name: Rendered originals are unchanged
+        run: python scripts/render_documents.py --check

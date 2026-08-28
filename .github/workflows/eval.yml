@@ -1,0 +1,173 @@
+# The paid half. This workflow calls Gemini through Vertex AI, so every line
+# below is about who is allowed to make it run and what the run leaves behind.
+#
+# Two triggers, both deliberate:
+#   workflow_dispatch — the button an operator presses before a demo or after a
+#     prompt change, with the tier and repeat count they want.
+#   schedule — a weekday morning run so a regression shows up as a red run on a
+#     date rather than as a surprise the night before judging.
+#
+# There is NO `pull_request` trigger and no `pull_request_target`. A PR from a
+# fork must not be able to spend money or touch a service account; keeping the
+# trigger absent is the enforcement, everything else is belt-and-braces.
+name: eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Which tier to run (blank = every task)"
+        type: choice
+        default: ""
+        options: ["", hero, core, breadth]
+      repeat:
+        description: "Attempts per task — one run of a stochastic model is an anecdote"
+        type: string
+        default: "1"
+  schedule:
+    # 05:30 UTC on weekdays. Comment this block out if the spend is not wanted
+    # between demos — docs/DEPLOY.md §11 says how, and says to put it back.
+    - cron: "30 5 * * 1-5"
+      timezone: Europe/Athens
+
+permissions:
+  contents: read
+  # Required by google-github-actions/auth: the job mints a short-lived OIDC
+  # token and exchanges it at STS. This is the whole reason no JSON key exists
+  # anywhere in this repo.
+  id-token: write
+
+# One eval at a time, and never cancelled: a half-finished eval still writes its
+# record and still spent the money, so killing it in flight buys nothing and
+# loses the evidence.
+concurrency:
+  group: eval
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    # Belt-and-braces. The WIF provider's attribute condition already pins
+    # repository_id, repository_owner_id and event_name, so a fork's token is
+    # refused at the STS exchange before any Vertex call happens. This line just
+    # makes a fork's run fail instantly and legibly instead of failing at auth.
+    if: github.repository == 'MDadopoulos/freightopsfleet'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      GOOGLE_GENAI_USE_VERTEXAI: "TRUE"
+      GOOGLE_CLOUD_PROJECT: gen-lang-client-0176688620
+      GOOGLE_CLOUD_LOCATION: global
+      FREIGHT_MODEL: gemini-3.7-flash
+      FREIGHT_WORKSPACE_ROOT: ${{ github.workspace }}/workspace
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          # The image Python, because this run is meant to look like the
+          # deployed one. The `render` extra is not installed — the eval reads
+          # canonical markdown, never the rendered PDFs.
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          # PROJECT_NUMBER is a placeholder: paste the number printed by the
+          # `gcloud projects describe` line in docs/DEPLOY.md §11. It is not the
+          # project ID — the pool path only accepts the numeric form.
+          workload_identity_provider: projects/819664522984/locations/global/workloadIdentityPools/github/providers/freightopsfleet
+          # This service account holds roles/aiplatform.user and nothing else.
+          # The runtime SA (freight-fleet@) can write the ledger buckets; the
+          # eval must never be able to, so it gets its own identity.
+          service_account: freight-eval@gen-lang-client-0176688620.iam.gserviceaccount.com
+
+      # The eval grades whatever FREIGHT_WORKSPACE_ROOT holds and never seeds
+      # itself, so the seed is an explicit step. `--clean` matters: a workspace
+      # carrying a transcription from an earlier `ingest --force` would be
+      # graded as if it were canonical.
+      - name: Seed the workspace
+        run: python scripts/seed_workspace.py --all --clean --workspace "$FREIGHT_WORKSPACE_ROOT"
+
+      - name: Run the golden tasks
+        env:
+          TIER: ${{ inputs.tier }}
+          REPEAT: ${{ inputs.repeat || '1' }}
+        run: |
+          # pipefail, or `tee` would hand the step a 0 from a failed eval and a
+          # red scoreboard would report itself as green.
+          set -o pipefail
+          python eval/run_eval.py ${TIER:+--tier "$TIER"} --repeat "$REPEAT" | tee eval-output.txt
+
+      # if: always() — a failed eval is exactly the run whose scoreboard someone
+      # wants to read, and run_eval.py writes its record after every attempt.
+      - name: Scoreboard
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          records = sorted(pathlib.Path("eval/runs").glob("*.json"))
+          summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          if not records:
+              summary.write_text(
+                  "No eval record was written - the run died before the first attempt graded.\n",
+                  encoding="utf-8",
+              )
+              raise SystemExit(0)
+
+          # The filenames are UTC stamps, so lexicographic order is chronological
+          # and the last one is this run's record.
+          rec = json.loads(records[-1].read_text(encoding="utf-8"))
+          repeat = rec.get("repeat", 1)
+          rounds = rec.get("rounds", [])
+          green = sum(1 for r in rounds if r.get("all_green"))
+          lines = [
+              f"## Eval `{rec['ts']}`",
+              "",
+              f"- model: `{rec['model']}`",
+              f"- attempts per task: {repeat} (completed: {rec.get('attempts_completed', 0)})",
+              f"- full runs all-green: {green}/{repeat}",
+              "",
+              "| task | passed | attempts | rate |",
+              "| --- | --- | --- | --- |",
+          ]
+          for row in rec.get("per_task", []):
+              rate = row.get("rate")
+              rate_s = "-" if rate is None else f"{rate:.2f}"
+              lines.append(f"| `{row['id']}` | {row['passed']} | {row['attempts']} | {rate_s} |")
+
+          # Errors and skips never reach per_task as a failure rate, so they are
+          # listed separately rather than left invisible under a short table.
+          odd = [r for r in rec.get("results", []) if r.get("status") in {"error", "not_wired"}]
+          if odd:
+              lines += ["", "### Attempts that did not grade", ""]
+              for r in odd:
+                  detail = str(r.get("details", ""))[:200]
+                  lines.append(f"- `{r['id']}` attempt {r.get('attempt')}: {r['status']} {detail}".rstrip())
+          lines.append("")
+          summary.write_text("\n".join(lines), encoding="utf-8")
+          print("\n".join(lines))
+          PY
+
+      # The record, the per-task ledgers the gate task is graded from, and the
+      # console output. Kept for 90 days because "it passed in August" is a
+      # claim someone will want to check in October.
+      - name: Upload the run
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: eval-run-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            eval/runs/*.json
+            audit/eval-*.jsonl
+            eval-output.txt
+          retention-days: 90

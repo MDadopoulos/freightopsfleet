@@ -128,6 +128,21 @@ def _readonly() -> bool:
     return bool(os.environ.get("FREIGHT_CONSOLE_READONLY"))
 
 
+def _mode() -> str:
+    """'' for the governed console, or 'sandbox' for a public playground on a
+    disposable copy of the state. Display-only, exactly like the schedule: it
+    changes what the pages SAY, never what the gate does — the sandbox is a
+    separate deployment whose store simply is not the governed one."""
+    return os.environ.get("FREIGHT_CONSOLE_MODE", "").strip().lower()
+
+
+def _sandbox_url() -> str:
+    """Where the disposable-copy console lives, if the operator deployed one.
+    Set on the read-only surface so its refusals can point somewhere a visitor
+    is allowed to press the button."""
+    return os.environ.get("FREIGHT_SANDBOX_URL", "").strip()
+
+
 # --- the data layer ----------------------------------------------------------
 # Four loaders, all fresh, all degrading to the empty case instead of raising. A
 # judge who clones the repo with an empty ledger must see a considered screen,
@@ -398,6 +413,10 @@ CSS = """
   --blocked:#A31515;  --blocked-tint:#FDE4E4;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* display face for headings and the big counts: an editorial serif, entirely
+     from system stacks — this page makes zero external requests and keeps it
+     that way. Body text stays sans; the record reads like a printed record. */
+  --display: "Iowan Old Style", "Palatino Linotype", Palatino, Charter, Georgia, "Times New Roman", serif;
 }
 @media (prefers-color-scheme: dark){
   :root{
@@ -423,6 +442,12 @@ code,pre,.mono{font-family:var(--mono)}
    name would inherit `position:sticky` and paint a border across a card. */
 .nav{position:sticky;top:0;z-index:5;background:var(--surface);
      border-bottom:1px solid var(--line);box-shadow:0 1px 2px rgba(0,0,0,.04)}
+/* the ledger rule — one hairline in the five outcome colors, the console's
+   whole state vocabulary declared before a single row is read. Decoration
+   only, and the one place these colors may sit side by side. */
+.nav::after{content:"";display:block;height:3px;opacity:.9;
+     background:linear-gradient(90deg,var(--held) 0 22%,var(--approved) 22% 42%,
+     var(--executed) 42% 62%,var(--rejected) 62% 81%,var(--blocked) 81% 100%)}
 .nav .in{max-width:920px;margin-inline:auto;padding-inline:20px;height:56px;
      display:flex;align-items:center;gap:16px}
 .rowtop{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
@@ -441,16 +466,16 @@ code,pre,.mono{font-family:var(--mono)}
 
 /* layout */
 .wrap{max-width:920px;margin-inline:auto;padding:32px 20px 96px}
-h1{font:650 30px/1.2 var(--sans);margin:0 0 8px}
-h2{font:600 22px/1.3 var(--sans);margin:0 0 8px}
+h1{font:650 34px/1.15 var(--display);letter-spacing:-.01em;margin:0 0 8px}
+h2{font:600 23px/1.25 var(--display);margin:0 0 8px}
 h3{font:600 17.5px/1.35 var(--sans);margin:24px 0 8px}
 p{margin:0 0 12px;max-width:68ch}
 .lede{color:var(--ink-2)}
 .meta{font:500 14px/1.45 var(--mono);color:var(--ink-3)}
 .label{font:700 12.5px/1 var(--sans);letter-spacing:.08em;text-transform:uppercase}
-.count{font:700 64px/1 var(--sans);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
-.count2{font:700 40px/1 var(--sans);font-variant-numeric:tabular-nums}
-.count3{font:700 30px/1 var(--sans);font-variant-numeric:tabular-nums}
+.count{font:700 72px/1 var(--display);letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.count2{font:700 42px/1 var(--display);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.count3{font:700 30px/1 var(--display);letter-spacing:-.01em;font-variant-numeric:tabular-nums}
 .band{margin:40px 0 0}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px}
 .sunk{background:var(--sunk);border:1px solid var(--line);border-radius:12px;padding:20px}
@@ -468,7 +493,7 @@ p{margin:0 0 12px;max-width:68ch}
      border:1px solid var(--line);border-left:6px solid var(--held);border-radius:12px;
      padding:20px;transition:background-color 120ms ease}
 .qcard:hover{background:var(--sunk)}
-.qtitle{font:600 22px/1.3 var(--sans);margin:8px 0}
+.qtitle{font:600 22px/1.3 var(--display);margin:8px 0}
 .qpath{font:500 15px/1.5 var(--mono);color:var(--ink-2);margin:8px 0;word-break:break-all}
 .qmeta{font:500 14px/1.45 var(--mono);color:var(--ink-3);margin:8px 0}
 .qgo{font:700 12.5px/1 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--accent);
@@ -545,7 +570,8 @@ details.raw pre{white-space:pre-wrap;word-break:break-word;font-size:15px;margin
 .btn{display:flex;align-items:center;justify-content:center;min-height:56px;padding:0 20px;
      border-radius:10px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);
      font:700 15px/1.2 var(--sans);text-align:center;cursor:pointer;width:100%;
-     transition:background-color 120ms ease}
+     transition:background-color 120ms ease,filter 120ms ease}
+.btn:not(:disabled):hover{filter:brightness(1.07)}
 .btn.outline{background:transparent;color:var(--ink);border-color:var(--line)}
 .btn:disabled{opacity:.55;cursor:not-allowed}
 form{margin:0}
@@ -572,6 +598,40 @@ hr{border:0;border-top:1px solid var(--line);margin:24px 0}
 .rail-dotted{border-left:2px solid transparent;
      background-image:repeating-linear-gradient(180deg,currentColor 0 2px,transparent 2px 5px);
      background-repeat:no-repeat;background-size:2px 100%;background-position:left top}
+
+/* display-only surfaces: the sandbox ribbon (§_mode) and the visitor brief.
+   Both change what the pages SAY, never what the gate does. */
+.ribbon{border-bottom:1px solid var(--line);background:var(--held-tint);color:var(--held);
+     padding:10px 20px;text-align:center;font:700 13px/1.5 var(--sans);
+     letter-spacing:.08em;text-transform:uppercase}
+.ribbon a{color:inherit}
+.brief{margin:24px 0 0;border:1px solid var(--line);border-left:6px solid var(--accent);
+     border-radius:12px;background:var(--surface);padding:20px 20px 12px}
+.brief ol{margin:10px 0 0;padding-left:24px}
+.brief li{margin:0 0 10px;max-width:68ch}
+.brief li::marker{font:700 15px var(--mono);color:var(--accent)}
+.statement{font:650 clamp(36px,7vw,58px)/1.1 var(--display);letter-spacing:-.015em;
+     margin:16px 0 20px;max-width:14ch}
+
+/* motion — one staggered arrival on load, CSS only. Anyone who asked their OS
+   for less motion gets none; there is no JavaScript to disable. */
+@media (prefers-reduced-motion: no-preference){
+  @keyframes rise{from{opacity:0;transform:translateY(10px)}}
+  .wrap>*{animation:rise .5s cubic-bezier(.2,.7,.3,1) backwards}
+  .wrap>:nth-child(2){animation-delay:.04s}
+  .wrap>:nth-child(3){animation-delay:.08s}
+  .wrap>:nth-child(4){animation-delay:.12s}
+  .wrap>:nth-child(5){animation-delay:.16s}
+  .wrap>:nth-child(6){animation-delay:.20s}
+  .wrap>:nth-child(7){animation-delay:.24s}
+  .wrap>:nth-child(n+8){animation-delay:.28s}
+  .queue .qcard{animation:rise .5s cubic-bezier(.2,.7,.3,1) backwards}
+  .queue .qcard:nth-child(2){animation-delay:.06s}
+  .queue .qcard:nth-child(3){animation-delay:.12s}
+  .queue .qcard:nth-child(4){animation-delay:.18s}
+  .queue .qcard:nth-child(5){animation-delay:.24s}
+  .queue .qcard:nth-child(n+6){animation-delay:.30s}
+}
 
 @media (max-width:640px){
   .wrap{padding-inline:0}
@@ -627,8 +687,13 @@ def _shell(title: str, body: str, *, active: str = "", pending: int = 0,
     if stranded:
         badge += (f'<span class="badge warn" title="held in the ledger, absent from the '
                   f'approval store">⚠ {stranded}</span>')
+    ribbon = ""
+    if _mode() == "sandbox":
+        ribbon = ('<div class="ribbon">Sandbox — a disposable copy of the record. Approve and '
+                  "reject are live here; nothing decided in it reaches the governed desk.</div>")
     nav = (
-        '<div class="nav"><div class="in">'
+        ribbon
+        + '<div class="nav"><div class="in">'
         '<span class="brand">Freight Ops<span class="long"> Fleet · Operator Console</span></span>'
         '<span class="navlinks">'
         + link("/", "Desk", "desk", badge)
@@ -1362,11 +1427,36 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
     else:
         queue = ""
 
+    # The visitor brief renders ONLY on the read-only surface: the operator has
+    # a desk, a visitor needs a map. Three sentences, and the third one tells
+    # them to press the button that will refuse — the refusal is the demo.
+    visitor_brief = ""
+    if _readonly():
+        sb = _sandbox_url()
+        sandbox_line = (
+            f' To press it and feel it work, use the <a href="{esc(sb)}">sandbox</a> — the same '
+            "console on a disposable copy of the record." if sb else ""
+        )
+        visitor_brief = (
+            '<div class="brief"><span class="label" style="color:var(--accent)">First visit — '
+            "what you are looking at</span><ol>"
+            "<li>A scheduled fleet of freight agents cross-checked the open shipments' documents "
+            "unattended. Every discrepancy notice it drafted stopped at a policy gate — "
+            "<strong>held for a human, nothing sent, nothing written</strong>.</li>"
+            "<li>Open a decision below to see what the operator sees: the drafted notice, the "
+            "policy contract that held it, and the exact documents the agent read first.</li>"
+            "<li>Try Approve. This public surface refuses with a 403 — it is deployed so it "
+            "<em>cannot</em> decide; decisions happen on the operator's authenticated console, "
+            f'and every one lands in the <a href="/ledger">ledger</a>.{sandbox_line}</li>'
+            "</ol></div>"
+        )
+
     body = (
         flash
         + "<h1>Operator desk</h1>"
         + '<p class="lede">The approval store is the authority for what is actionable; the ledger '
           "is the authority for what happened. This screen also checks that the two agree.</p>"
+        + visitor_brief
         + _divergence_strip(recon)
         + brief + queue
         + _cleared_strip(entries, sweep)
@@ -1544,8 +1634,10 @@ def decision(approval_id: str) -> HTMLResponse:
             '<div class="actions">'
             '<button class="btn" disabled>Approve — disabled</button>'
             '<button class="btn outline" disabled>Reject — disabled</button>'
-            '<p class="meta">READ-ONLY CONSOLE — decisions are enabled in the local instance.</p>'
-            "</div>"
+            '<p class="meta">READ-ONLY CONSOLE — decisions are enabled in the local instance.'
+            + (f' Buttons are live in the <a href="{esc(_sandbox_url())}">sandbox</a>.'
+               if _sandbox_url() else "")
+            + "</p></div>"
         )
     elif not hold.executable:
         actions = (
@@ -1587,9 +1679,28 @@ def decision(approval_id: str) -> HTMLResponse:
 # --- the two writes ----------------------------------------------------------
 
 def _forbidden() -> HTMLResponse:
-    body = ("<h1>403 — Read-only console</h1>"
-            '<p class="lede">READ-ONLY CONSOLE — decisions are enabled in the local instance. '
-            "No store was touched and no ledger row was written.</p>"
+    """The refusal, designed as the demo's best moment rather than an error.
+
+    A visitor pressing Approve on the public URL lands here, and this page has
+    one job: say that the refusal is structural — a deployment property, not a
+    disabled button — because on an open URL a working approve would make any
+    stranger the human in the loop."""
+    sb = _sandbox_url()
+    sandbox = (
+        f'<p class="lede">To press the button and feel it work, use the <a href="{esc(sb)}">'
+        "sandbox</a> — the same console, live buttons, a disposable copy of the record.</p>"
+        if sb else ""
+    )
+    body = ('<p class="label" style="color:var(--blocked)">403 · Structurally refused</p>'
+            '<div class="statement">This surface cannot decide.</div>'
+            '<p class="lede">READ-ONLY CONSOLE — no approval was granted, no store was touched '
+            "and no ledger row was written. The decision routes on this deployment refuse before "
+            "reaching the store: the buttons are not disabled by styling, the capability is "
+            "absent. On an open URL, a working Approve would make any stranger the human in the "
+            "loop — so the public surface is configured so that it cannot act at all. Decisions "
+            "happen on the operator's authenticated console, through the same gate the agent "
+            "hit.</p>"
+            + sandbox +
             '<p><a href="/">← Back to the desk</a></p>')
     return HTMLResponse(_shell("403 — read-only", body, show_footer=False), status_code=403)
 

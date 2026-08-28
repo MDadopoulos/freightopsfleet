@@ -30,7 +30,10 @@ def _seed_workspace() -> None:
     """Copy fixtures into the workspace if it is empty. Idempotent."""
     if (_WORKSPACE / "shipments").is_dir() or not _FIXTURES.is_dir():
         return
-    for sub in ("shipments", "inbox", "quotes"):
+    # raw/ holds the rendered originals the ingest step reads. It is carried in
+    # so the deployed container shows the same arrival surface as a local
+    # workspace: read_file refuses them as `binary`, which is the honest answer.
+    for sub in ("shipments", "inbox", "quotes", "raw"):
         src = _FIXTURES / sub
         if src.is_dir():
             shutil.copytree(src, _WORKSPACE / sub, dirs_exist_ok=True)

@@ -9,6 +9,7 @@ data/
 workspace/
 tests/
 scripts/
+!scripts/seed_workspace.py
 docs/
 **/__pycache__/
 *.pyc

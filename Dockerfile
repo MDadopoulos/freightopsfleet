@@ -25,6 +25,13 @@ RUN pip install --no-cache-dir .
 COPY fixtures/ ./fixtures/
 COPY deploy/agents/ ./agents/
 
+# Seed the workspace at build time: the sweep iterates workspace/shipments/ on
+# start and the console's evidence pages read the same documents, so an empty
+# workspace makes both dead on arrival. Fixtures hold no answer keys, so
+# nothing leaks by baking them in.
+COPY scripts/seed_workspace.py ./scripts/seed_workspace.py
+RUN python scripts/seed_workspace.py --all --workspace /app/workspace
+
 RUN mkdir -p /app/workspace /app/audit /app/data && chown -R fleet:fleet /app
 USER fleet
 

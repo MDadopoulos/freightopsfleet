@@ -153,6 +153,66 @@ Container numbers carry correct ISO 6346 check digits and air waybill numbers
 carry correct mod-7 check digits — computed, not typed, so a typo is a red test
 rather than a rotten fixture.
 
+**A freight desk does not receive markdown.** `fixtures/raw/` is the arrival
+surface: 26 originals — 23 PDFs and three scan-like PNGs, the last with seeded
+noise, a slight skew and a blur, so at least one document arrives as pixels
+rather than as extractable text. They are *rendered from* the canonical markdown
+by `scripts/render_documents.py`, so the two can never disagree about a figure,
+and they are committed rather than built — `python scripts/render_documents.py --check`
+is the seal, and CI runs it on every push. `read_file` refuses all of them with
+`{"status": "binary"}`, which is the honest answer for a tool that reads text.
+
+Turning them into something the fleet can read is an operator step, not an agent
+decision:
+
+```bash
+python -m freight_fleet.cli ingest --dry-run    # the plan; no credentials needed
+python -m freight_fleet.cli ingest              # transcribe raw/ into inbox/
+```
+
+Each transcription lands in `inbox/` with a
+`<!-- transcribed from raw/... by MODEL -->` marker on line one, so a model's
+reading of a scan is never mistaken for a hand-written fixture. The eval never
+runs it — the scoreboard grades the canonical markdown, which does not move.
+`docs/DEPLOY.md` §1a has the cost, the naming rule and the reseed step.
+
+---
+
+## Ask the fleet
+
+The chat surface is ADK's dev UI behind Google sign-in — a judge can ask the
+fleet something rather than only reading what it already did.
+
+**Live URL:** `https://freight-ops-chat-819664522984.europe-west1.run.app`
+
+**You will be asked to sign in with a Google account.** That is not
+bureaucracy: it is the only surface where a visitor's click spends model
+tokens, and the signed identity is what scopes the conversation. Sessions are
+durable and **per Google account** — sign out, sign back in, and your own
+history is still there; nobody else's ever is. (`docs/DEPLOY.md` §4d explains
+how the server pins `user_id` to the verified JWT, and why the UI's "Edit user
+ID" control is cosmetic.)
+
+Eight questions worth asking, in the order that makes the argument:
+
+| Ask | Desk it exercises | What to look for |
+|---|---|---|
+| *Cross-check shipment shp-002-hero and list every discrepancy with the document each figure comes from* | `cross_check` | **Four** discrepancies — a 714 kg weight gap, a 20-carton count mismatch, an incoterm that contradicts the freight clause, and an invoice line that doesn't multiply. Each figure should be attributed to the document it was read from. |
+| *Is shp-001-pristine clean?* | `cross_check`, the false-positive control | Nothing. This shipment has no discrepancies, and the only correct answer says so. An invented finding here is worse than a missed one. |
+| *Sort the documents in inbox/ into shipment sets and tell me what is missing* | `doc_intake` | Loose paperwork grouped by what it says, not by its filename — plus the gaps named. |
+| *Compare the two quotes in quotes/ against the freight invoice for shp-004-quote-invoice* | `quote_intake` | Two incomparable quotes normalised to one all-in figure, and the seeded trap caught: Hamburg was requested, both quotes route to Rotterdam. |
+| *Which shipment is missing a commercial invoice, and draft the chaser* | `doc_chaser` | It finds the gap, drafts the chaser — and **stops**. The draft is HELD, nothing is written and nothing is sent. See the caveat below. |
+| *Read raw/inbox/scan_001.pdf* | `workspace:read_file` | A refusal: `{"status": "binary"}` plus the hint to run `ingest`. The fleet reads documents, and it will not pretend to have read one it cannot. |
+| *Check the container numbers on shp-003-container-refs* | `cross_check` | ISO 6346 check-digit arithmetic, done rather than assumed. |
+| *What did you tell me last time about shp-002-hero?* — after signing out and back in | durable sessions | It remembers. That is Cloud SQL behind the container, not a browser tab holding state. |
+
+**One caveat, and it matters.** A hold raised in this chat lands in **that
+container's own disposable ledger** — you will see it in the reply, and it is
+**not** the ops console's governed record. It is a demonstration of the gate,
+not an entry in the audit trail. To click **approve** on a real held action, use
+the public sandbox console (`docs/DEPLOY.md` §4c), where the buttons work
+against a durable store that is disposable on purpose.
+
 ---
 
 ## Start here

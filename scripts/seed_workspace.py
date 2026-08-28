@@ -2,8 +2,12 @@
 """Seed the agent workspace from fixtures.
 
     python scripts_seed_workspace.py                    # hero + clean control
-    python scripts_seed_workspace.py --all              # every shipment + inbox + quotes
+    python scripts_seed_workspace.py --all              # + inbox, quotes and raw
     python scripts_seed_workspace.py --clean            # wipe the workspace first
+
+Without `--all` you get the hero pair and nothing else — no `raw/`, so
+`python -m freight_fleet.cli ingest` has nothing to plan. That is deliberate:
+the default seed is the smallest workspace the hero task needs.
 
 ANSWER KEYS ARE NEVER COPIED. They do not live under fixtures/ at all — they are
 in eval/answer_keys/, a directory this script cannot reach by construction. An
@@ -44,11 +48,14 @@ def main() -> int:
         print(f"  shipments/{s}/  ({len(list(dst.iterdir()))} documents)")
 
     if args.all:
-        for extra in ("inbox", "quotes"):
+        # raw/ holds the rendered originals the ingest step reads — the PDFs and
+        # scans the markdown in inbox/ and shipments/ was rendered from. Counted
+        # with rglob because raw/ is a tree, not a flat directory.
+        for extra in ("inbox", "quotes", "raw"):
             src = FIXTURES / extra
             if src.is_dir():
                 shutil.copytree(src, ws / extra, dirs_exist_ok=True)
-                print(f"  {extra}/  ({len(list((ws / extra).iterdir()))} files)")
+                print(f"  {extra}/  ({sum(1 for p in (ws / extra).rglob('*') if p.is_file())} files)")
 
     (ws / "outbox").mkdir(exist_ok=True)
 

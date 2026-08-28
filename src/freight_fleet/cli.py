@@ -8,6 +8,7 @@
     python -m freight_fleet.cli approvals grant <approval_id>
     python -m freight_fleet.cli approvals reconcile
     python -m freight_fleet.cli approvals abandon <approval_id> [--note "..."]
+    python -m freight_fleet.cli ingest [--only GLOB] [--force] [--dry-run]
     python -m freight_fleet.cli console [--port 8080]
 
 `chat` runs ONE turn against the coordinator on a DURABLE session
@@ -33,6 +34,12 @@ rows is a false statement on the operator's decision surface.
 `catalog` and `ledger` work today with no credentials — they read code-owned data
 and the JSONL ledger. `approvals` shares the durable `FileApprovalStore` with the
 fleet process, so a hold placed by the sweep is grantable from a later shell.
+
+`ingest` is the one command here that reads the ARRIVAL surface: it transcribes
+the PDFs and scans under `workspace/raw/` into markdown under `workspace/inbox/`,
+which is where the fleet already looks. It is a command and not a tool on
+purpose — see `freight_fleet.ingest` for why. `--dry-run` prints the plan and
+needs no credentials.
 
 `console` serves the same four artifacts — ledger, approval store, catalog,
 committed runs — as HTML for an operator who does not live in a terminal. It
@@ -462,6 +469,65 @@ def cmd_approvals(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """Transcribe `workspace/raw/` into `workspace/inbox/` markdown.
+
+    `ingest` is imported HERE rather than at module scope so `catalog`, `ledger`
+    and `approvals` keep starting without paying for it — the same reason every
+    other model-touching command in this file defers its imports. (The module
+    itself imports `google.genai` lazily too, so even this import is cheap; the
+    rule is worth keeping uniform anyway.)
+
+    Exits 1 if anything failed, because a scheduled or scripted ingest that
+    transcribed twenty-five of twenty-six documents and returned 0 would be a
+    silent hole in the inbox.
+    """
+    from pathlib import Path
+
+    from . import ingest as ingest_mod
+
+    workspace = Path(os.environ.get("FREIGHT_WORKSPACE_ROOT", "./workspace")).resolve()
+    report = ingest_mod.run(
+        workspace,
+        ingest_mod.transcribe_with_genai(args.model),
+        only=args.only,
+        force=args.force,
+        dry_run=args.dry_run,
+        model_label=args.model,
+    )
+
+    print(f"\n  INGEST — raw/ -> inbox/ under {workspace}")
+    if not report.planned:
+        print("\n  nothing to ingest (no raw/ originals matched)."
+              " Seed with: python scripts/seed_workspace.py --all\n")
+        return 0
+    print()
+
+    # One line per PLANNED item, in plan order, whatever happened to it: the
+    # operator's mental model is the plan, and a run that reordered its output
+    # by outcome would be unreadable against the dry run they just read.
+    outcome = {it.source: ("wrote", "") for it in report.written}
+    outcome.update({it.source: ("skip", "exists; --force to overwrite") for it in report.skipped})
+    outcome.update({it.source: ("FAIL", why) for it, why in report.failed})
+    for item in report.planned:
+        src = item.source.relative_to(workspace).as_posix()
+        dst = item.target.relative_to(workspace).as_posix()
+        if args.dry_run:
+            print(f"  plan  {src} -> {dst}{'  [exists]' if item.exists else ''}")
+            continue
+        verb, detail = outcome.get(item.source, ("?", "not reached"))
+        print(f"  {verb:5} {src} -> {dst}{'  ' + detail if detail else ''}")
+
+    if args.dry_run:
+        print(f"\n  {len(report.planned)} planned, "
+              f"{sum(1 for it in report.planned if it.exists)} already in inbox/. "
+              "Nothing was written.\n")
+        return 0
+    print(f"\n  {len(report.written)} written, {len(report.skipped)} skipped (exists), "
+          f"{len(report.failed)} failed\n")
+    return 1 if report.failed else 0
+
+
 def cmd_console(args: argparse.Namespace) -> int:
     """Serve the operator console. No credentials, no model — every page is a
     read of the ledger, the approval store, the catalog or a committed run."""
@@ -472,7 +538,10 @@ def cmd_console(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """`argv` is a parameter so the tests can drive a whole command in-process
+    (`main(["ingest", "--dry-run"])`) instead of asserting on a subprocess's
+    stdout. `None` keeps the normal `sys.argv` behaviour."""
     ap = argparse.ArgumentParser(prog="freight_fleet.cli")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -499,12 +568,21 @@ def main() -> int:
     p_appr.add_argument("--note", default="", help="operator note recorded with an abandon")
     p_appr.set_defaults(fn=cmd_approvals)
 
+    p_ingest = sub.add_parser("ingest", help="transcribe workspace/raw originals into inbox markdown")
+    p_ingest.add_argument("--only", default=None,
+                          help="glob against the raw-relative path, e.g. 'inbox/scan_001*'")
+    p_ingest.add_argument("--force", action="store_true", help="overwrite inbox targets that exist")
+    p_ingest.add_argument("--dry-run", action="store_true", help="print the plan, call no model")
+    p_ingest.add_argument("--model", default=os.environ.get("FREIGHT_MODEL", "gemini-3.7-flash"),
+                          help="Gemini model that transcribes each document (default: $FREIGHT_MODEL)")
+    p_ingest.set_defaults(fn=cmd_ingest)
+
     p_console = sub.add_parser("console", help="serve the operator console (no credentials)")
     p_console.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
     p_console.add_argument("--host", default="127.0.0.1")
     p_console.set_defaults(fn=cmd_console)
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     return args.fn(args)
 
 

@@ -20,6 +20,14 @@ WORKSPACE_ROOT = Path(os.environ.get("FREIGHT_WORKSPACE_ROOT", "./workspace")).r
 
 MAX_READ_BYTES = 512_000
 
+#: The suffixes this tool can honestly decode. Everything else fails CLOSED with
+#: a hint, because the alternative is worse than an error: a PDF decoded with
+#: `errors="replace"` yields a page of mojibake with a few real words floating in
+#: it, and an agent given that will confidently report the words it can see as
+#: the contents of the document. A refusal is a fact the agent can act on; a
+#: corrupted read is a fact it cannot detect.
+TEXT_SUFFIXES = {".md", ".csv", ".txt"}
+
 
 class WorkspaceError(Exception):
     """Raised for a path outside the jail or an unreadable file."""
@@ -36,6 +44,10 @@ def _safe(path: str) -> Path:
 def read_file(path: str) -> dict:
     """Read one workspace file as UTF-8 text.
 
+    Only .md, .csv and .txt are readable. Any other file returns status
+    "binary": the original still needs the operator's ingest step, and its
+    transcription will appear under inbox/.
+
     Args:
         path: Workspace-relative path, e.g. "shipments/shp-002-hero/waybill.md".
     """
@@ -43,6 +55,13 @@ def read_file(path: str) -> dict:
         target = _safe(path)
         if not target.is_file():
             return {"status": "not_found", "path": path}
+        if target.suffix.lower() not in TEXT_SUFFIXES:
+            return {
+                "status": "binary",
+                "path": path,
+                "hint": "not a text document; run `python -m freight_fleet.cli ingest` "
+                        "to transcribe raw/ into inbox/",
+            }
         raw = target.read_bytes()[:MAX_READ_BYTES]
         return {"status": "ok", "path": path, "content": raw.decode("utf-8", errors="replace")}
     except WorkspaceError as exc:
