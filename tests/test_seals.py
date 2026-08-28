@@ -30,7 +30,7 @@ CONSOLE = ROOT / "src" / "freight_fleet" / "console.py"
 #: The four things a console import must not drag in. `freight_fleet.ingest`
 #: joins the model packages here because it is the one module in the tree whose
 #: whole purpose is to spend money on a model call.
-FORBIDDEN = ("google.adk", "google.genai", "freight_fleet.devui", "freight_fleet.ingest")
+FORBIDDEN = ("google.adk", "google.genai", "freight_fleet.devui", "freight_fleet.access", "freight_fleet.ingest")
 
 
 def test_console_imports_no_model_or_ingest_code():

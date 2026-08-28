@@ -933,6 +933,37 @@ minutes is not yet evidence of anything.
 
 ---
 
+### The invite code — who was invited, not only who they are
+
+Once the consent screen is published, `allAuthenticatedUsers` means *any* Google
+account, and every signed-in visitor can make the fleet spend money. IAP cannot
+express "invited"; `freight_fleet.access` can. It sits inside the IAP layer and
+asks, once per browser, for a code the operator hands out in the submission form:
+
+```bash
+export CODE="FLEET-$(openssl rand -hex 3 | tr a-f A-F)-$(openssl rand -hex 3 | tr a-f A-F)"
+printf '%s' "$CODE" | gcloud secrets create freight-chat-access-code --replication-policy=automatic --data-file=-
+gcloud secrets add-iam-policy-binding freight-chat-access-code   --member "serviceAccount:$SA" --role roles/secretmanager.secretAccessor
+gcloud run services update "$CHAT" --region "$REGION"   --update-secrets FREIGHT_CHAT_ACCESS_CODE=freight-chat-access-code:latest
+echo "$CODE"   # goes in the submission form and nowhere else
+```
+
+What it does: a signed-in visitor without the cookie is sent to `/access`, a
+plain HTML form; API calls and the websocket are refused outright (403 / 4403).
+The right code sets a `HttpOnly; Secure; SameSite=Lax` cookie for seven days,
+signed with a key derived from the code itself — so **rotating the code
+(`gcloud secrets versions add` + the `update-secrets` line again) invalidates
+every cookie** with no second secret to manage. Five wrong guesses from one
+address lock it out for fifteen minutes. Whitespace and case are ignored: judges
+type these by hand.
+
+What it does not do: it is not an identity. The IAP layer still pins every
+`user_id` to the signed-in email, so two judges sharing one code still get their
+own sessions and their own history. Unset, the gate passes everything through —
+the same convention `FREIGHT_IAP_AUDIENCE` follows for local development.
+
+---
+
 ## 5. Deploy the sweep as a Job
 
 The sweep is not a web request — it is a scheduled batch run that must exit.

@@ -193,6 +193,11 @@ history is still there; nobody else's ever is. (`docs/DEPLOY.md` §4d explains
 how the server pins `user_id` to the verified JWT, and why the UI's "Edit user
 ID" control is cosmetic.)
 
+**Then it asks for an access code** — the one in the submission form. Google
+sign-in says who you are; the code says you were invited. It is the only thing
+standing between any Google account on earth and the fleet's model budget, so it
+is rotated after judging and never appears in this repo.
+
 Eight questions worth asking, in the order that makes the argument:
 
 | Ask | Desk it exercises | What to look for |

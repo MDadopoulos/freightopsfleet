@@ -331,7 +331,8 @@ def test_create_app_uses_the_repos_session_uri_form(monkeypatch):
     assert recorded["agents_dir"] == "/app/agents"
     assert recorded["port"] == 8081
     assert isinstance(app, IapIdentityMiddleware)
-    assert app.app == "adk-app"
+    # The access-code gate sits between IAP and ADK, inert when no code is set.
+    assert app.app.code is None and app.app.app == "adk-app"
     assert app.audience == "/projects/1/locations/europe-west1/services/chat"
 
 

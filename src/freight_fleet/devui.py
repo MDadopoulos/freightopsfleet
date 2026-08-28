@@ -36,6 +36,8 @@ Environment:
   `/projects/PROJECT_NUMBER/locations/REGION/services/SERVICE`. UNSET means
   local development: the middleware passes every request through untouched and
   the UI's self-asserted user id stands. Never leave it unset in a deployment.
+* `FREIGHT_CHAT_ACCESS_CODE` — the invite code a visitor must enter once after
+  signing in (`access.py`). UNSET means local development: no gate.
 * `FREIGHT_SESSIONS_DB` — session store URI (default local SQLite).
 * `FREIGHT_AGENTS_DIR` — the ADK app directory (default `/app/agents`, the
   image's copy of `deploy/agents/`).
@@ -284,7 +286,13 @@ def create_app() -> Any:
         bind_host="0.0.0.0",
         port=port,
     )
-    return IapIdentityMiddleware(app, audience=os.environ.get("FREIGHT_IAP_AUDIENCE"))
+    # Order matters: IAP identity outermost, so an anonymous request is refused
+    # before it can even see the access form; the code gate inside, so only a
+    # signed-in visitor gets to spend a guess.
+    from .access import AccessCodeMiddleware
+
+    gated = AccessCodeMiddleware(app, code=os.environ.get("FREIGHT_CHAT_ACCESS_CODE"))
+    return IapIdentityMiddleware(gated, audience=os.environ.get("FREIGHT_IAP_AUDIENCE"))
 
 
 def app_factory() -> Any:
