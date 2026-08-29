@@ -219,6 +219,9 @@ the fleet something rather than only reading what it already did, watch it hand
 work to a desk, and see a draft stop at the gate. ADK's own developer UI stays
 reachable at `/dev-ui/` as a raw trace view.
 
+**Live:** <https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/chat> — behind the
+same login as everything else.
+
 **One login, two ways in.** `/access` puts both panels side by side: type a
 username and password from the submission, or type the invite code and continue
 with Google. The demo login involves no Google account at all; Google sign-in

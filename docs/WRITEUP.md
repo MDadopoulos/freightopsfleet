@@ -185,10 +185,9 @@ The decision surface is a web page (`src/freight_fleet/console.py`), because the
 person who approves a shipment notice does not live in a terminal.
 
 > The console adds no capability. It renders five artifacts the fleet already
-> produced — the ledger, the approval store, the scored runs, the catalog, the
-> mail spool — it
-> never calls a model, and its only button goes back through the same gate the
-> agent hit.
+> produced — the ledger, the approval store, the scored runs, the catalog and
+> the mail spool — it never calls a model, and its only write button goes back
+> through the same gate the agent hit.
 
 That last clause is the load-bearing one. Approving from the browser calls
 `governance.gate.execute_approved`, the **identical function** `cli approvals

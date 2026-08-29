@@ -462,7 +462,7 @@ def cmd_approvals(args: argparse.Namespace) -> int:
         print(f"  no pending approval {aid}")
         return 1
     if res.status == "not_executable":
-        print(f"  {res.tool} has no executable body wired (by design for send_email)")
+        print(f"  {res.tool} has no executable body wired - the hold stands")
         return 1
     if res.status == "gate_refused":
         print(f"  gate refused the replay: {(res.gate or {}).get('status')} - not executing")
