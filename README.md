@@ -10,6 +10,19 @@ in an append-only audit ledger.
 > Built for the [All Things Agentic Hackathon](https://allthingsagentichackathon.devpost.com/),
 > track: **The Fortified Enterprise Fleet**.
 
+## Live — four doors, one image
+
+| Door | URL | What you can do there |
+|---|---|---|
+| **Public desk** | <https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/> | Read everything the fleet produced overnight: the held drafts, the evidence it read, the ledger. Press *Approve* and watch the surface refuse with a 403 — that refusal is the point. |
+| **Sandbox** | <https://freight-ops-sandbox-819664522984.europe-west1.run.app/> | The same console on a disposable copy of the record, with the buttons live. Approve a draft, see the file appear and the ledger row land. |
+| **Ask the fleet** | <https://freight-ops-chat-819664522984.europe-west1.run.app/chat> | Chat with the fleet. Google sign-in, then the access code from the submission. |
+| **Ask the fleet — demo login** | <https://freight-ops-chat-demo-819664522984.europe-west1.run.app/chat> | The same chat, no Google account: username and password from the submission. |
+
+Every shipment, party and figure on these pages is fictional. The operator's own
+console — where decisions are real — is a fifth deployment behind IAM and is not
+linked; `docs/DEPLOY.md` explains why the public one structurally cannot decide.
+
 ---
 
 ## Why this is not another chatbot with tools

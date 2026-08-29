@@ -422,7 +422,7 @@ whole operator surface:
 
 ```bash
 python scripts/adk_spike.py          # proves the gate short-circuits the tool body
-python -m pytest tests/ -q           # 73 tests
+python -m pytest tests/ -q           # 211 tests, no credentials
 python -m freight_fleet.cli console  # the console at http://localhost:8080, no API key
 ```
 
@@ -432,10 +432,13 @@ python -m freight_fleet.cli console  # the console at http://localhost:8080, no 
 
 - **Repo:** https://github.com/MDadopoulos/freightopsfleet
 - **Demo video:** [ADD LINK]
-- **Live URL:** [ADD IF DEPLOYED — see `docs/DEPLOY.md`]. The deployed image
-  serves the **operator console** at `/`, so the URL renders the Desk with no
-  credentials and cannot burn Gemini quota. Deploy it with
-  `FREIGHT_CONSOLE_READONLY=1` and the two decision buttons are disabled.
+- **Public desk (read-only, for anyone):** https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/ —
+  renders the Desk with no credentials, cannot burn model quota, and its approve
+  button returns 403 by deployment (`FREIGHT_CONSOLE_READONLY=1`).
+- **Sandbox (buttons live, disposable copy):** https://freight-ops-sandbox-819664522984.europe-west1.run.app/
+- **Ask the fleet (Google sign-in + access code):** https://freight-ops-chat-819664522984.europe-west1.run.app/chat
+- **Ask the fleet (demo login):** https://freight-ops-chat-demo-819664522984.europe-west1.run.app/chat —
+  credentials are in the submission form, not here.
 - **Architecture:** `docs/ARCHITECTURE.md`
 - **Track mapping:** `HACKATHON.md`
 - **Provenance:** `docs/REUSE-LEDGER.md`
@@ -446,7 +449,7 @@ python -m freight_fleet.cli console  # the console at http://localhost:8080, no 
 
 1. **Team names / roles.**
 2. **Demo video link** (script ready in `docs/DEMO-SCRIPT.md`).
-3. **Live URL**, if you deploy.
+3. ~~Live URLs~~ — deployed; see Links above.
 4. **Check the official rules on pre-existing work.** The reused fixtures and
    prompts are the parts at issue. If the rules require everything to be new, the
    honest options are to disclose and accept the ruling, or re-author the

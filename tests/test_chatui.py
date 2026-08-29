@@ -24,7 +24,8 @@ def test_starters_match_the_readme_table():
     from pathlib import Path
 
     readme = Path(__file__).resolve().parents[1].joinpath("README.md").read_text(encoding="utf-8")
-    rows = [line for line in readme.splitlines() if line.startswith("| *")]
+    section = readme.split("## Ask the fleet", 1)[1].split("\n## ", 1)[0]
+    rows = [line for line in section.splitlines() if line.startswith("| *") and not line.startswith("| **")]
     asked = [row.split("|")[1].strip().strip("*").split("* —")[0].strip() for row in rows]
     assert [a.rstrip("*").strip() for a in asked] == chatui.STARTERS
 
