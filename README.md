@@ -10,18 +10,28 @@ in an append-only audit ledger.
 > Built for the [All Things Agentic Hackathon](https://allthingsagentichackathon.devpost.com/),
 > track: **The Fortified Enterprise Fleet**.
 
-## Live — four doors, one image
+## Live — one door
 
-| Door | URL | What you can do there |
-|---|---|---|
-| **Public desk** | <https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/> | Read everything the fleet produced overnight: the held drafts, the evidence it read, the ledger. Press *Approve* and watch the surface refuse with a 403 — that refusal is the point. |
-| **Sandbox** | <https://freight-ops-sandbox-819664522984.europe-west1.run.app/> | The same console on a disposable copy of the record, with the buttons live. Approve a draft, see the file appear and the ledger row land. |
-| **Ask the fleet** | <https://freight-ops-chat-819664522984.europe-west1.run.app/chat> | Chat with the fleet. Google sign-in, then the access code from the submission. |
-| **Ask the fleet — demo login** | <https://freight-ops-chat-demo-819664522984.europe-west1.run.app/chat> | The same chat, no Google account: username and password from the submission. |
+**<https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/>**
 
-Every shipment, party and figure on these pages is fictional. The operator's own
-console — where decisions are real — is a fifth deployment behind IAM and is not
-linked; `docs/DEPLOY.md` explains why the public one structurally cannot decide.
+That is the homepage. Sign in at
+[`/access`](https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/access) — either
+the **demo login** (username and password from the submission) or **Google
+sign-in** (the invite code, then your Google account). Either way you get a
+name, and that name is pinned into every conversation and stamped on every
+decision you make. Everything below sits behind that one login, on one nav.
+
+| Behind the login | What you can do there |
+|---|---|
+| **Desk** — `/desk` | The approval queue. Open a held email: the draft, the contract for what approving it does, and the documents the agent read to write it. **Approve** or **Reject** — the buttons are live, and the ledger row carries your name. |
+| **Ask the fleet** — `/chat` | Ask the agents something, upload a scan, watch the routing and every tool call in the trace. A hold raised here lands on the Desk. |
+| **Sent** — `/sent` | What actually left: the subject, the address the fleet drafted for, where it was really delivered, and who approved it. |
+| **Ledger · Fleet · Evidence** | The append-only record; the catalog, where each agent declares its owner, data scope and tool allow-list; the documents and the scoreboard. |
+
+The buttons work for everyone signed in — this is the same unrestricted system
+the operator uses, not a demo mode of it. What makes that safe is the data:
+every shipment, party and figure is fictional, and the one action that leaves
+the building cannot reach a real address (see below).
 
 ---
 
@@ -40,6 +50,16 @@ problems in a consistent document set is worse than useless to an operator.
 from every agent passes `before_tool_gate`, which classifies it and either runs
 it, holds it for a human, or blocks it. Unknown tools fail closed. No layer may
 ever loosen a verdict — only tighten it.
+
+**And the gate is what makes unattended work allowed at all.** The workspace is
+not scratch space — it is the shipment record, the thing a customs entry and an
+invoice dispute are argued from. The morning sweep runs at 06:00 with nobody
+watching, which is the whole point and also the reason a human has to stand
+between it and the record. So the fleet drafts and stops. The one action that
+cannot be taken back — `send_email` — is the one the gate holds on every path,
+without exception, and even after a human approves it the message does not go to
+the address the model drafted: delivery is to the operator's own demo mailbox
+and to the approver. The model can propose a recipient; it can never reach one.
 
 ---
 
@@ -105,13 +125,14 @@ manual-tier tasks are reviewed by eye. Try the async story too:
 
 ```bash
 python -m freight_fleet.cli sweep               # every open shipment, unattended
-python -m freight_fleet.cli approvals list      # what the sweep held for you
+python -m freight_fleet.cli approvals list      # the emails it drafted and held for you
 python -m freight_fleet.cli approvals reconcile # does the record match the queue?
 python -m freight_fleet.cli console             # the operator console at http://localhost:8080
 ```
 
-`console` needs **no credentials** — it renders four artifacts the fleet already
-produced (the ledger, the approval store, the catalog, the committed runs), never
+`console` needs **no credentials** — it renders five artifacts the fleet already
+produced (the ledger, the approval store, the catalog, the committed runs, the
+mail spool), never
 calls a model, and ships zero JavaScript. It offers exactly two buttons —
 **approve**, which replays the held call through the same `before_tool_gate` the
 agent hit, and **reject**, which records the decision and writes nothing. Set
@@ -142,7 +163,7 @@ src/freight_fleet/
   agents/        ADK fleet assembly
   governance/    policy · gate · ledger   ← the trust boundary
   catalog/       agent cards
-  tools/         path-jailed workspace file tools
+  tools/         the workspace jail's file tools, and send_email
 fixtures/        6 shipments, an inbox, competing quotes — agent-readable
 eval/
   answer_keys/   ground truth — NEVER seeded into a workspace
@@ -194,35 +215,42 @@ runs it — the scoreboard grades the canonical markdown, which does not move.
 ## Ask the fleet
 
 The chat surface is one page, `/chat`, in front of ADK's API — a judge can ask
-the fleet something rather than only reading what it already did, watch it
-hand work to a desk, and see a draft stop at the gate. ADK's own developer UI
-stays reachable at `/dev-ui/` as a trace view.
+the fleet something rather than only reading what it already did, watch it hand
+work to a desk, and see a draft stop at the gate. ADK's own developer UI stays
+reachable at `/dev-ui/` as a raw trace view.
 
-**Live URL:** `https://freight-ops-chat-819664522984.europe-west1.run.app/chat`
+**One login, two ways in.** `/access` puts both panels side by side: type a
+username and password from the submission, or type the invite code and continue
+with Google. The demo login involves no Google account at all; Google sign-in
+runs on our own OAuth client, and the code is what makes it a door rather than a
+public spend button — any Google account on earth can sign in, only an invited
+one is let through. Neither credential lives in this repo; both are in the
+submission form, and both are retired after judging.
 
-**You will be asked to sign in with a Google account.** That is not
-bureaucracy: it is the only surface where a visitor's click spends model
-tokens, and the signed identity is what scopes the conversation. Sessions are
-durable and **per Google account** — sign out, sign back in, and your own
-history is still there; nobody else's ever is. (`docs/DEPLOY.md` §4d explains
-how the server pins `user_id` to the verified JWT, and why the UI's "Edit user
-ID" control is cosmetic.)
+**Your name follows you.** Whichever door you came through, the username or the
+verified email is pinned into every ADK session server-side and stamped on every
+ledger row you decide (“… by judge2”). Conversations are durable and per
+identity — sign out, sign back in, and your own history is still there; nobody
+else's ever is.
 
-**Then it asks for an access code** — the one in the submission form. Google
-sign-in says who you are; the code says you were invited. It is the only thing
-standing between any Google account on earth and the fleet's model budget, so it
-is rotated after judging and never appears in this repo.
+**The sidebar does three things.** It lists your conversations — Cloud SQL
+behind the container, not a browser tab holding state. It takes an **upload**:
+a PDF, PNG or JPEG up to 6 MB, which goes into the fleet's `inbox/` through the
+same `ingest` step the operator runs, transcribed by Gemini with the same
+provenance marker every ingested page carries, and then offers to ask the fleet
+about it. And it counts **this visit** — turns, tokens in and out, and a dollar
+estimate when the operator has set `FREIGHT_PRICE_IN_PER_M` /
+`FREIGHT_PRICE_OUT_PER_M`. (The catalog declares a $0.50 cap per run per desk;
+the panel is what makes the spend visible.)
 
-**Would rather not sign in with a Google account?** The same chat runs a second
-time as a **demo login** — username and password from the submission, no Google
-involved. Each username is its own identity with its own durable history, and the
-credentials are retired after judging.
+**Every turn shows its work.** Folded under each answer is a **Trace** — who
+did what, in order: every tool call with a digest of its arguments, what came
+back, what was held, what errored — alongside route, HELD and BLOCKED cards as
+they happen.
 
-**Demo login URL:** `https://freight-ops-chat-demo-819664522984.europe-west1.run.app/chat`
-
-Either way, ask about a *named* shipment or folder, as the table does. A question
-that would need every shipment cross-checked ("which one has the most
-discrepancies?") is one the coordinator declines rather than guesses at.
+Ask about a *named* shipment or folder, as the table does. A question that would
+need every shipment cross-checked ("which one has the most discrepancies?") is
+one the coordinator declines rather than guesses at.
 
 Eight questions worth asking, in the order that makes the argument:
 
@@ -237,12 +265,12 @@ Eight questions worth asking, in the order that makes the argument:
 | *Check the container numbers on shp-003-container-refs* | `cross_check` | ISO 6346 check-digit arithmetic, done rather than assumed. |
 | *What did you tell me last time about shp-002-hero?* — after signing out and back in | durable sessions | It remembers. That is Cloud SQL behind the container, not a browser tab holding state. |
 
-**One caveat, and it matters.** A hold raised in this chat lands in **that
-container's own disposable ledger** — you will see it in the reply, and it is
-**not** the ops console's governed record. It is a demonstration of the gate,
-not an entry in the audit trail. To click **approve** on a real held action, use
-the public sandbox console (`docs/DEPLOY.md` §4c), where the buttons work
-against a durable store that is disposable on purpose.
+**One caveat, and it is now the good news.** A hold raised in this chat is not
+a demonstration in a throwaway ledger. It goes into the **same approval store
+and the same append-only record the Desk reads** — one service, one state. Ask
+for the chaser, watch it stop, then click **Desk** in the nav: it is waiting
+there, with the email, the contract and the documents it was drafted from, and
+your name on the row once you decide. Chat, gate, desk and ledger are one loop.
 
 ---
 

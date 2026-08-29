@@ -90,7 +90,7 @@ def restore_uploads(workspace: Path) -> int:
             if path.is_file():
                 target = workspace / sub / path.relative_to(src)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, target)
+                shutil.copyfile(path, target)
                 n += 1
     return n
 
@@ -240,7 +240,7 @@ def build_app(adk: Any) -> Any:
         if durable is not None:
             keep = durable / inbox_rel
             keep.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(written, keep)
+            shutil.copyfile(written, keep)
         return JSONResponse({
             "status": "ok",
             "raw": f"raw/{rel.as_posix()}",

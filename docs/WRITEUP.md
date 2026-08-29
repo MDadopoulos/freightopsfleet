@@ -67,8 +67,9 @@ level, and a per-run cost cap:
     key        cross_check
     desk       Import operations  (owner: Ops lead)
     autonomy   drafts-for-approval
-    data scope shipments/** (read), outbox/** (draft)
-    tools      read_file, list_files, glob_files, grep_files, write_file
+    data scope shipments/** (read), outbox/** (draft), mail (send — held)
+    tools      read_file, list_files, glob_files, grep_files, write_file,
+               check_container_number, send_email
     cap        $0.50/run
 ```
 
@@ -121,7 +122,7 @@ skipped; it does not end the run, and it does not pass silently either:
   shp-006-missing-doc      [new conversation] shp-006-missing-doc: 1 discrepancies
 
   5 draft(s) held for approval; nothing sent, nothing written.
-    7e9f37b3-…  outbox/MFSB-26071842-discrepancy-notice.md
+    7e9f37b3-…  [MFSB-26071842] Discrepancy notice
 ```
 
 That last line is the requirement. It ran, nobody was watching, it found real
@@ -161,18 +162,31 @@ EXECUTED  write_file  outbox/shp-002-notice.md  replayed after approval; result 
 retires a grant the moment it lets the replay through, so an approval id that
 leaks cannot be replayed forever.
 
-And the fleet **drafts; it never sends**. `send_email` is risk-classified as
-CRITICAL and deliberately unwired. Both approval surfaces refuse to execute it by
-design — the console renders the APPROVE button *disabled*, with the reason on
-its face, which makes that invariant visible rather than asserted.
+And the fleet **drafts; it never sends unattended**. `send_email` is wired now,
+and it is risk-classified CRITICAL with an external side effect, so the gate
+holds it on *every* path — there is no code path from a model turn to
+`smtplib`. It runs only as a human-approved replay from the Desk.
+
+The delivery policy is the second half of that sentence, and it is enforced in
+the tool body rather than promised in a prompt: **the model never chooses the
+real recipient.** The `to` the agent drafted is recorded as the *intended*
+recipient and is never used for delivery. The message goes to the operator's
+demo mailbox (`FREIGHT_MAIL_SINK`) and, when the approving human signed in with
+Google, a copy to their own address. Subjects are prefixed `[Freight Ops demo]`.
+The decision page says all of this on its face before you click — *the fleet
+addressed it to ops@carrier.example; it will **not** go there* — which makes the
+invariant visible rather than asserted. Transport is Gmail SMTP where the
+operator configured it and a spool otherwise; either way the spool is the
+evidence, and the **Sent** page reads it.
 
 ### The operator console
 
 The decision surface is a web page (`src/freight_fleet/console.py`), because the
 person who approves a shipment notice does not live in a terminal.
 
-> The console adds no capability. It renders four artifacts the fleet already
-> produced — the ledger, the approval store, the scored runs, the catalog — it
+> The console adds no capability. It renders five artifacts the fleet already
+> produced — the ledger, the approval store, the scored runs, the catalog, the
+> mail spool — it
 > never calls a model, and its only button goes back through the same gate the
 > agent hit.
 
@@ -203,12 +217,16 @@ Two more things the console does that a dashboard would not:
   at the foot of the page). The screen whose thesis is that the record is the
   product should be able to say where every figure came from.
 
-Zero JavaScript, zero new dependencies, no chat box, no "run the sweep" button,
-no policy editor, no filters: `<details>` for expansion, `<form method="post">`
-for the two actions, `:target` for deep links, `prefers-color-scheme` for theme.
-An unauthenticated live URL with a model behind it is a cost and abuse surface
-and a coin flip on camera; the CLI is the agent's surface, the console is the
-operator's.
+Zero JavaScript, zero new dependencies, no policy editor, no filters:
+`<details>` for expansion, `<form method="post">` for the actions, `:target` for
+deep links, `prefers-color-scheme` for theme. The console module still imports
+no model code and still ships no script tag, and the seals check both.
+
+The deployed service composes that module with the chat page and with a **Run
+the sweep now** button, and those deliberately live in *other* modules
+(`chatui.py`, `webapp.py`). An unauthenticated URL with a model behind it is a
+cost and abuse surface, so the answer was to put a login in front of the model —
+not to put a chat box inside the record-reading console.
 
 ---
 
@@ -381,8 +399,24 @@ wiring; both are documented where the next person will look.
 
 ## Honest scope
 
-- The fleet **drafts**; it does not transmit. `send_email` is classified but
-  deliberately unwired.
+- The fleet **drafts**; a human transmits. `send_email` is wired, classified
+  CRITICAL with an external side effect, and therefore held on every path — it
+  runs only as an approved replay from the Desk. **It cannot reach the address
+  the model drafted.** That `to` is recorded as the *intended* recipient;
+  delivery goes to the operator's demo mailbox and, if the approver signed in
+  with Google, to their own address. Subject lines carry `[Freight Ops demo]`.
+  Without SMTP credentials the transport is a spool and the **Sent** page is the
+  mailbox.
+- **Uploads are read by the model, not by an OCR contract.** A judge's PDF or
+  scan (≤ 6 MB) goes through the same `ingest` step the operator runs: Gemini
+  transcribes it into `inbox/` with a provenance marker naming the model. The
+  fleet then reasons over a *transcription*, and the eval never touches that
+  path — the scoreboard grades the canonical markdown, which does not move.
+- **The per-run cost cap is declared, not enforced by code.** Each catalog card
+  carries `$0.50/run`; the chat page shows tokens in and out per turn and per
+  visit, with a dollar figure when the operator has set the price env vars.
+  Those numbers are for the operator's eyes. The hard ceilings are the model
+  quota and Cloud Run's `--max-instances`.
 - Documents are **synthetic**. Every trading party is fictional; ports,
   UN/LOCODEs and HS codes are real public facts. Container check digits (ISO
   6346) and AWB check digits are computed, not typed.
@@ -422,7 +456,7 @@ whole operator surface:
 
 ```bash
 python scripts/adk_spike.py          # proves the gate short-circuits the tool body
-python -m pytest tests/ -q           # 211 tests, no credentials
+python -m pytest tests/ -q           # 234 tests, no credentials
 python -m freight_fleet.cli console  # the console at http://localhost:8080, no API key
 ```
 
@@ -430,15 +464,16 @@ python -m freight_fleet.cli console  # the console at http://localhost:8080, no 
 
 ## Links
 
-- **Repo:** https://github.com/MDadopoulos/freightopsfleet
+- **Live — the homepage:** https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/
+- **Sign in:** https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/access — demo
+  login (username and password) or Google sign-in with the invite code. Both
+  sets of credentials are in the submission form, never in the repo.
+- **The desk:** https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/desk — the
+  approval queue, the buttons live.
+- **Ask the fleet:** https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/chat — a
+  hold raised here lands on that same desk.
+- **Source:** https://github.com/MDadopoulos/freightopsfleet
 - **Demo video:** [ADD LINK]
-- **Public desk (read-only, for anyone):** https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/ —
-  renders the Desk with no credentials, cannot burn model quota, and its approve
-  button returns 403 by deployment (`FREIGHT_CONSOLE_READONLY=1`).
-- **Sandbox (buttons live, disposable copy):** https://freight-ops-sandbox-819664522984.europe-west1.run.app/
-- **Ask the fleet (Google sign-in + access code):** https://freight-ops-chat-819664522984.europe-west1.run.app/chat
-- **Ask the fleet (demo login):** https://freight-ops-chat-demo-819664522984.europe-west1.run.app/chat —
-  credentials are in the submission form, not here.
 - **Architecture:** `docs/ARCHITECTURE.md`
 - **Track mapping:** `HACKATHON.md`
 - **Provenance:** `docs/REUSE-LEDGER.md`

@@ -20,10 +20,10 @@ scoreboard is reproducible or a screenshot.
 | Track requirement | What answers it here | Where |
 |---|---|---|
 | **Agents cataloged for cross-department use** | A code-owned catalog where every agent declares its desk, accountable owner, tool surface, data scope, autonomy level and per-run cost cap. Five agents across three departments — import ops, procurement, customer service. An agent not in the catalog is not in the fleet. | `src/freight_fleet/catalog/registry.py` |
-| **Context maintained safely across weeks of async operation** | A shipment is genuinely a multi-week object: booked in week 1, sails in week 2, arrives in week 5, and discrepancies surface at any point. Sessions are durable (`cli chat` over `DatabaseSessionService`): kill the process, start another, and the fleet still knows what it found. The unattended sweep (`cli sweep`) re-checks every open shipment with nobody watching and stops at the gate — drafts held, outbox untouched. | `src/freight_fleet/cli.py` (`chat`, `sweep`) |
-| **Interacting with production data without violating compliance or security** | One gate seam classifies every tool call: read-only runs, consequential holds for a human, unknown fails closed. Nothing leaves the building — the fleet drafts, the operator sends. Every decision lands in an append-only ledger the operator can show their boss. | `src/freight_fleet/governance/` |
+| **Context maintained safely across weeks of async operation** | A shipment is genuinely a multi-week object: booked in week 1, sails in week 2, arrives in week 5, and discrepancies surface at any point. Sessions are durable (`cli chat` over `DatabaseSessionService`): kill the process, start another, and the fleet still knows what it found. The unattended sweep (`cli sweep`) re-checks every open shipment with nobody watching, drafts the correction e-mail for each one and stops at the gate — every send held, nothing transmitted. What the operator finds in the morning is a stack of e-mails waiting for a human, not files waiting to be written. | `src/freight_fleet/cli.py` (`chat`, `sweep`) |
+| **Interacting with production data without violating compliance or security** | One gate seam classifies every tool call: read-only runs, consequential holds for a human, unknown fails closed. The fleet drafts; the operator sends. `send_email` is CRITICAL with an external side effect, so it is held on every path and runs only as a human-approved replay — and its body delivers to the operator's demo mailbox and the approver, never to the address the model drafted. Every decision lands in an append-only ledger the operator can show their boss. | `src/freight_fleet/governance/`, `tools/mail.py` |
 | **Production-shaped inputs, not a curated text corpus** | The documents arrive as 26 PDFs and scans under `fixtures/raw/` — rendered *from* the canonical text so the two can never disagree, committed and byte-sealed by `--check`. `read_file` refuses a binary rather than guessing at it, and an operator command transcribes the pile into the inbox with a marker line saying a model read it. Realistic intake, without making the graded path stochastic. | `scripts/render_documents.py`, `src/freight_fleet/ingest.py`, `docs/DEPLOY.md` §1a |
-| **A surface a judge can interrogate, safely** | Four doors from one image. A public read-only desk whose approve button returns 403 by deployment, not by CSS; a sandbox on a disposable copy of the record where the buttons work; and a chat page (`/chat`, in front of ADK's API) behind two gates — Google sign-in through IAP plus an invite code, or a demo login for a judge who would rather not sign in. In both, a middleware overwrites `user_id` in the path, body and query string with the verified identity, so per-user sessions are enforced server-side. Sessions live in Cloud SQL through the same `DatabaseSessionService` the CLI uses — one durable store, four entry points. | `src/freight_fleet/devui.py`, `access.py`, `chatui.py`, `docs/DEPLOY.md` §4c–§4d |
+| **A surface a judge can interrogate, safely** | One service, one door. A public homepage, then a login page with two panels: a demo login (username and password) or Google sign-in behind an invite code, on our own OAuth client. Behind it one nav — Desk, Ledger, Sent, Fleet, Evidence, Ask the fleet — with the buttons live for everyone, because the safety is the fictional data and the gate, not a disabled control. A middleware strips the identity header off every incoming request and sets its own, so per-user sessions are enforced server-side. **The loop is closed**: a hold raised in chat is the same hold the Desk approves, in one approval store and one ledger, and what leaves shows up on Sent. Sessions live in Cloud SQL through the same `DatabaseSessionService` the CLI uses. | `src/freight_fleet/webapp.py`, `access.py`, `chatui.py`, `console.py` |
 | **The scoreboard is a build artifact, not a screenshot** | Lint, tests and the fixture seals run on every push with no credentials; the paid eval is a separate workflow reachable only by `workflow_dispatch` and `schedule`, authenticating through Workload Identity Federation with no JSON key anywhere and a service account holding `roles/aiplatform.user` and nothing else. | `.github/workflows/ci.yml`, `.github/workflows/eval.yml`, `docs/DEPLOY.md` §11 |
 
 ---
@@ -75,8 +75,14 @@ strictly"*, which is a real engineering argument, not marketing.
 
 Include something like this in the submission. Judges reward it, and it is true.
 
-- The fleet **drafts**; it does not transmit. `send_email` is risk-classified but
-  deliberately unwired.
+- The fleet **drafts**; a human sends. `send_email` is wired, risk-classified
+  CRITICAL with an external side effect, and therefore held on every path — it
+  runs only as an approved replay from the Desk. The model never chooses the
+  real recipient: the drafted `to` is recorded as *intended*, and delivery goes
+  to the operator's demo mailbox plus the approver's own address if they signed
+  in with Google. Subjects are prefixed `[Freight Ops demo]`. With no SMTP
+  credentials configured the transport is a spool and the Sent page is the
+  mailbox.
 - Documents are **synthetic**. Every trading party is fictional; ports, UN/LOCODEs
   and HS codes are real public facts. Check digits are computed, not typed.
 - The **domain procedures and document fixtures were authored by the team before
@@ -89,12 +95,12 @@ Include something like this in the submission. Judges reward it, and it is true.
 - The scoreboard's manual tier (`g7`, `g8`) is reviewed by eye, and that review
   found both correct — including `g8` catching the seeded destination-port trap
   (Hamburg requested, both quotes to Rotterdam). Eye-review is still not a regex.
-- The deployed **chat surface is sandbox-class for governance**: a hold raised
-  there lands in that container's own disposable ledger and vanishes with the
-  instance. It demonstrates the gate; it is not the audit record. The governed
-  ledger has exactly the writers it has always had — the sweep and the operator
-  console — and the submission says which surface is which rather than letting a
-  judge assume.
+- The deployed surface is **one service sharing one state**: a hold raised in the
+  chat is the same hold the Desk approves, in the same approval store and the
+  same append-only ledger. Every decision made there is real for the demo record
+  and carries the deciding visitor's name. What keeps that safe is not a
+  disabled button — it is that every shipment is fictional and the one
+  irreversible action cannot reach a real address.
 - Document **ingestion is a paid, best-effort step, and the eval does not use
   it**. Transcription is pinned to a seed and low thinking, which is stable in
   practice and not guaranteed; the scoreboard grades the canonical markdown, so
