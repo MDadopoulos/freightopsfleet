@@ -29,8 +29,11 @@ hold while you work.
 
 6. **No LLM judge in the grading path.** Every check is deterministic.
 
-7. **The fleet drafts; it never sends.** `send_email` stays classified and
-   unwired. Anything that leaves the building is out of scope for V1.
+7. **The fleet drafts; it never sends unattended.** `send_email` is CRITICAL
+   with an external side effect, so it is held on every path and runs only as
+   a human-approved replay. Its body (`tools/mail.py`) never delivers to the
+   address the model drafted — only to the operator's configured mailbox and
+   the approving human. Do not add a recipient the model can choose.
 
 8. **Fixtures are canonical.** Do not edit a document to make a test pass. The
    answer keys assert that the printed values really appear in the files — change

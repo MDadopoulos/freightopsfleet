@@ -71,7 +71,9 @@ TOOL_SPECS: Final[dict[str, ToolSpec]] = {
     "check_container_number": ToolSpec(
         "check_container_number", Risk.LOW, False,
         "Verify a container number's ISO 6346 check digit."),
-    "send_email": ToolSpec("send_email", Risk.CRITICAL, True,  "Transmit a drafted notice. NOT WIRED in V1."),
+    "send_email": ToolSpec("send_email", Risk.CRITICAL, True,
+                           "Transmit a drafted notice. Always held; delivered only to the "
+                           "operator's demo mailbox and the approving human, never to the drafted address."),
     # Delegation to a specialist desk. LOW because the delegation itself only
     # moves text: every tool call the specialist then makes re-enters this same
     # gate under the specialist's own name, so nothing consequential can hide

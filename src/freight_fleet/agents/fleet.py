@@ -57,7 +57,7 @@ from google.adk.tools.agent_tool import AgentTool
 from ..catalog.registry import FLEET, AgentCard
 from ..governance.gate import ApprovalStore, make_before_tool_gate
 from ..governance.ledger import Ledger
-from ..tools import containers, workspace
+from ..tools import containers, mail, workspace
 
 _PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -66,7 +66,10 @@ _PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 # Workspace tools plus the deterministic checkers. Merged here rather than in
 # `workspace` because a checker touches no workspace: it is arithmetic the fleet
 # must not improvise, not I/O it must not do unsupervised.
-_TOOL_FNS = {**workspace.TOOL_FNS, **containers.TOOL_FNS}
+# `mail` last: the one body with an external side effect, and the one the gate
+# holds on every path — see `tools/mail.py` for why the model never picks the
+# real recipient.
+_TOOL_FNS = {**workspace.TOOL_FNS, **containers.TOOL_FNS, **mail.TOOL_FNS}
 
 COORDINATOR_INSTRUCTION = """
 You run the ops desk of a freight forwarder. You do not do the specialist work

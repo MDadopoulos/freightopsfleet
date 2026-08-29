@@ -330,6 +330,14 @@ class ReplayResult:
     gate: dict[str, Any] | None = None   # the gate's own dict when status == gate_refused
 
 
+def _by(actor: str) -> str:
+    """` by <who>` for the ledger detail when the surface knows who clicked.
+    Detail, not a schema field: the row's shape is storage-agnostic and the
+    actor is a fact about one deployment's login, not about the decision."""
+    actor = (actor or "").strip()
+    return f" by {actor}" if actor else ""
+
+
 def _decision_row(payload: dict[str, Any], approval_id: str, outcome: str,
                   detail: str, source: str) -> LedgerEntry:
     """The ledger row for an operator decision.
@@ -361,7 +369,7 @@ class _ReplayCtx:
 
 
 def execute_approved(approval_id: str, *, ledger: Ledger, approvals: ApprovalStore,
-                     tool_fns: dict[str, Any], source: str) -> ReplayResult:
+                     tool_fns: dict[str, Any], source: str, actor: str = "") -> ReplayResult:
     """Grant, then REPLAY THROUGH THE GATE. The only path by which a held call runs.
 
     The replay is not a shortcut around the gate — it is a second trip through
@@ -431,14 +439,14 @@ def execute_approved(approval_id: str, *, ledger: Ledger, approvals: ApprovalSto
     status = str(result.get("status", "unknown"))
     detail = f"status={status}" if status == "ok" else f"status={status}: {result.get('message', '')}".strip()
     ledger.append(_decision_row(payload, approval_id, "executed",
-                                f"replayed after approval; result status={status}", source))
+                                f"replayed after approval{_by(actor)}; result status={status}", source))
     return ReplayResult("executed", approval_id, tool=name,
                         path=str(result.get("path", path)),
                         bytes=result.get("bytes"), detail=detail)
 
 
 def reject_approved(approval_id: str, *, ledger: Ledger, approvals: ApprovalStore,
-                    source: str) -> ReplayResult:
+                    source: str, actor: str = "") -> ReplayResult:
     """Retire a hold without running it. Records `rejected`; writes nothing.
 
     A rejection is a decision, so it is evidence — the ledger row exists even
@@ -456,7 +464,7 @@ def reject_approved(approval_id: str, *, ledger: Ledger, approvals: ApprovalStor
     if payload is None:
         return ReplayResult("not_pending", approval_id,
                             detail=f"no pending approval {approval_id}")
-    ledger.append(_decision_row(payload, approval_id, "rejected", "operator rejected", source))
+    ledger.append(_decision_row(payload, approval_id, "rejected", f"operator rejected{_by(actor)}", source))
     approvals.reject(approval_id)
     return ReplayResult("rejected", approval_id, tool=str(payload.get("tool", "")),
                         path=str((payload.get("args") or {}).get("path", "")),

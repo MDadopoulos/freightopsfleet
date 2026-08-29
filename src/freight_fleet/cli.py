@@ -216,8 +216,9 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         prompt = (
             f"Unattended morning sweep ({run_id}). Cross-check shipments/{shipment}. "
             f"{history} "
-            "If there are discrepancies, draft the notice and save it under outbox/ "
-            "(it will be held for approval). Finish with one line: "
+            "If there are discrepancies, draft the notice and send it with send_email to the "
+            "party the documents name as responsible (it will be held for a human; do not "
+            "also save it). Finish with one line: "
             f"'{shipment}: N discrepancies'."
         )
         runner = Runner(agent=agent, app_name=_APP, session_service=session_service)
@@ -259,7 +260,8 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         pending = store.pending()
         print(f"\n  {len(pending)} draft(s) held for approval; nothing sent, nothing written.")
         for aid, payload in pending.items():
-            print(f"    {aid}  {payload.get('args', {}).get('path', '?')}")
+            a = payload.get('args', {})
+            print(f"    {aid}  {a.get('path') or a.get('subject') or '?'}")
         # The sweep is exactly where a hold gets stranded, so it checks its own
         # work before it exits rather than leaving the operator to find out from
         # an empty queue tomorrow morning.

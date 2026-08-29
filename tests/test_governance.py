@@ -265,10 +265,16 @@ def test_every_wired_tool_is_classified():
     without a risk row would be a capability the gate cannot classify — and
     `classify()` would BLOCK it, so the failure is loud rather than silent.
     This asserts the loudness never has to happen."""
+    from freight_fleet.agents.fleet import _TOOL_FNS
+    from freight_fleet.tools.mail import TOOL_FNS as MAIL
     from freight_fleet.tools.workspace import TOOL_FNS
 
-    assert [name for name in TOOL_FNS if name not in TOOL_SPECS] == []
-    assert "send_email" not in TOOL_FNS, "AGENTS.md #7 — the fleet drafts; it never sends"
+    assert [name for name in {**TOOL_FNS, **MAIL, **_TOOL_FNS} if name not in TOOL_SPECS] == []
+    # AGENTS.md #7: the send is wired, and it is wired as the one CRITICAL,
+    # external tool — so the gate holds it on every path, never runs it unattended.
+    assert "send_email" in MAIL and "send_email" not in TOOL_FNS
+    spec, verdict = classify("send_email")
+    assert spec.external_side_effect and verdict is Verdict.ASK
 
 
 def test_a_refused_replay_leaves_no_dangling_grant(seam, monkeypatch):

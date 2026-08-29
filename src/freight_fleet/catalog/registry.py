@@ -42,8 +42,8 @@ FLEET: Final[tuple[AgentCard, ...]] = (
         ),
         prompt_file="cross_check.md",
         tools=("read_file", "list_files", "glob_files", "grep_files", "write_file",
-               "check_container_number"),
-        data_scope="shipments/** (read), outbox/** (draft)",
+               "check_container_number", "send_email"),
+        data_scope="shipments/** (read), outbox/** (draft), mail (send — held)",
         autonomy="drafts-for-approval",
     ),
     AgentCard(
@@ -75,8 +75,8 @@ FLEET: Final[tuple[AgentCard, ...]] = (
         owner="CS lead",
         description="Triages rollovers, holds and delays into facts, demurrage exposure, and options.",
         prompt_file="tracking_triage.md",
-        tools=("read_file", "list_files", "grep_files", "write_file"),
-        data_scope="shipments/** (read), outbox/** (draft)",
+        tools=("read_file", "list_files", "grep_files", "write_file", "send_email"),
+        data_scope="shipments/** (read), outbox/** (draft), mail (send — held)",
         autonomy="drafts-for-approval",
     ),
     AgentCard(
@@ -86,8 +86,8 @@ FLEET: Final[tuple[AgentCard, ...]] = (
         owner="Ops lead",
         description="Finds missing documents, identifies who owes each, drafts escalating chasers.",
         prompt_file="doc_chaser.md",
-        tools=("read_file", "list_files", "glob_files", "grep_files", "write_file"),
-        data_scope="shipments/** (read), outbox/** (draft)",
+        tools=("read_file", "list_files", "glob_files", "grep_files", "write_file", "send_email"),
+        data_scope="shipments/** (read), outbox/** (draft), mail (send — held)",
         autonomy="drafts-for-approval",
     ),
 )

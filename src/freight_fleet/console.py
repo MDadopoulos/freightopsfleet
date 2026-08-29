@@ -68,7 +68,7 @@ from .governance.gate import (
     reject_approved,
 )
 from .governance.ledger import Ledger, LedgerEntry
-from .tools import workspace
+from .tools import mail, workspace
 
 #: The one console-caused session id. Every ledger row this app writes carries
 #: it, so the record says WHERE a human decided, not merely that one did.
@@ -76,9 +76,9 @@ SOURCE = "approval-console"
 
 #: The tool bodies the console may replay — the SAME mapping the ADK assembly
 #: wraps, so the console can only ever replay a body an agent could have run.
-#: `send_email` is absent because it is unwired (AGENTS.md #7), and the console
-#: renders that absence on a disabled button rather than hiding it.
-_TOOL_FNS: dict[str, Callable[..., dict]] = workspace.TOOL_FNS
+#: `send_email` is in it (AGENTS.md #7): a send is a human's click here, and
+#: `tools/mail.py` is where the recipient policy lives, not this file.
+_TOOL_FNS: dict[str, Callable[..., dict]] = {**workspace.TOOL_FNS, **mail.TOOL_FNS}
 
 #: A ledger line that will not parse becomes one of these rather than being
 #: skipped. A skipped line in an append-only ledger is precisely the thing this
@@ -128,48 +128,32 @@ def _readonly() -> bool:
     return bool(os.environ.get("FREIGHT_CONSOLE_READONLY"))
 
 
-def _mode() -> str:
-    """'' for the governed console, or 'sandbox' for a public playground on a
-    disposable copy of the state. Display-only, exactly like the schedule: it
-    changes what the pages SAY, never what the gate does — the sandbox is a
-    separate deployment whose store simply is not the governed one."""
-    return os.environ.get("FREIGHT_CONSOLE_MODE", "").strip().lower()
+def _gated() -> bool:
+    """True when a login sits in front of this console (the deployed shape), so
+    the nav offers a sign-out. Display-only, like everything read from env: the
+    login is the middleware's, and the console never checks a cookie itself."""
+    return bool(os.environ.get("FREIGHT_GATED", "").strip())
 
 
-def _surfaces() -> tuple[str, list[tuple[str, str, str]]]:
-    """Where a visitor is, and where else they can go — (label, url, note) per
-    other surface, from env, so the switcher is one more thing the operator TELLS
-    the console rather than something it discovers. Empty list: no switcher."""
-    if _mode() == "sandbox":
-        here = "Sandbox — a disposable copy, buttons live"
-    elif _readonly():
-        here = "Public desk — read-only"
-    else:
-        here = "Operator console — decisions are real"
-    links: list[tuple[str, str, str]] = []
-    public = os.environ.get("FREIGHT_PUBLIC_URL", "").strip()
-    if public and (_mode() == "sandbox" or not _readonly()):
-        links.append(("Public desk", public, "read-only, for anyone"))
-    sb = _sandbox_url()
-    if sb and _mode() != "sandbox":
-        links.append(("Sandbox", sb, "buttons live on a disposable copy"))
-    chat = os.environ.get("FREIGHT_CHAT_URL", "").strip()
-    if chat:
-        links.append(("Ask the fleet", chat, "Google sign-in + access code"))
-    demo = os.environ.get("FREIGHT_CHAT_DEMO_URL", "").strip()
-    if demo:
-        links.append(("Ask the fleet", demo, "demo login, no Google account"))
-    repo = os.environ.get("FREIGHT_REPO_URL", "").strip()
-    if repo:
-        links.append(("Source", repo, "the repo"))
-    return here, links
+def _chat_url() -> str:
+    """Where "Ask the fleet" lives — `/chat` on the same host in the deployed
+    shape, absent for a console served on its own."""
+    return os.environ.get("FREIGHT_CHAT_URL", "").strip()
 
 
-def _sandbox_url() -> str:
-    """Where the disposable-copy console lives, if the operator deployed one.
-    Set on the read-only surface so its refusals can point somewhere a visitor
-    is allowed to press the button."""
-    return os.environ.get("FREIGHT_SANDBOX_URL", "").strip()
+def _sweep_job() -> str:
+    """The Cloud Run Job the desk may trigger, if the deployment allows it. The
+    console renders the button; the surface that holds credentials (`webapp`)
+    handles the POST — this file still holds none."""
+    return os.environ.get("FREIGHT_SWEEP_JOB", "").strip()
+
+
+def _who(request: Request) -> str:
+    """Who is clicking, as the login layer reports it, or the bare word the CLI
+    and a local console use. The header is set — and any incoming one stripped —
+    by `access.AccessCodeMiddleware`; the console trusts it exactly as far as it
+    trusts the process in front of it, which is the deployment's job to arrange."""
+    return request.headers.get("x-fleet-identity", "").strip() or "operator"
 
 
 # --- the data layer ----------------------------------------------------------
@@ -492,6 +476,10 @@ code,pre,.mono{font-family:var(--mono)}
 .badge{margin-left:6px;font:700 12.5px/1 var(--mono);background:var(--held-tint);
      color:var(--held);border-radius:4px;padding:3px 6px}
 .badge.warn{background:var(--blocked-tint);color:var(--blocked)}
+.navlinks a.quiet{color:var(--ink-3);font-weight:500}
+.navlinks a.chat{color:var(--accent)}
+.btn.small{display:inline-flex;min-height:44px;padding:0 16px;font-size:14.5px}
+.inline{display:inline-block;margin:12px 0 0}
 
 /* layout */
 .wrap{max-width:920px;margin-inline:auto;padding:32px 20px 96px}
@@ -708,6 +696,38 @@ def esc(value: Any) -> str:
     return html.escape(str(value if value is not None else ""))
 
 
+def nav_html(active: str = "", pending: int = 0, stranded: int = 0) -> str:
+    """The one nav, shared with the chat page so a visitor never learns two
+    layouts. Everything beyond the console's own pages comes from env: the
+    console is TOLD where the chat is, never discovers it."""
+    def link(href: str, text: str, key: str, badge: str = "", cls: str = "") -> str:
+        cur = ' aria-current="page"' if key == active else ""
+        klass = f' class="{cls}"' if cls else ""
+        return f'<a href="{href}"{cur}{klass}>{esc(text)}{badge}</a>'
+
+    badge = f'<span class="badge">{pending}</span>' if pending else ""
+    if stranded:
+        badge += (f'<span class="badge warn" title="held in the ledger, absent from the '
+                  f'approval store">⚠ {stranded}</span>')
+    links = (
+        link("/desk", "Desk", "desk", badge)
+        + link("/ledger", "Ledger", "ledger")
+        + link("/sent", "Sent", "sent")
+        + link("/fleet", "Fleet", "fleet")
+        + link("/evidence", "Evidence", "evidence")
+    )
+    chat = _chat_url()
+    if chat:
+        links += link(chat, "Ask the fleet", "chat", cls="chat")
+    if _gated():
+        links += link("/logout", "Sign out", "logout", cls="quiet")
+    return (
+        '<div class="nav"><div class="in">'
+        '<span class="brand">Freight Ops<span class="long"> Fleet</span></span>'
+        f'<span class="navlinks">{links}</span></div></div>'
+    )
+
+
 def _shell(title: str, body: str, *, active: str = "", pending: int = 0,
            stranded: int = 0, show_footer: bool = True) -> str:
     """The page frame. One CSS string, one nav, one footer, no script tag.
@@ -717,50 +737,12 @@ def _shell(title: str, body: str, *, active: str = "", pending: int = 0,
     cannot act on. Adding them would turn a broken queue into a fuller-looking
     one, which is the exact confusion this whole change exists to remove.
     """
-    def link(href: str, text: str, key: str, badge: str = "") -> str:
-        cur = ' aria-current="page"' if key == active else ""
-        return f'<a href="{href}"{cur}>{esc(text)}{badge}</a>'
-
-    badge = f'<span class="badge">{pending}</span>' if pending else ""
-    if stranded:
-        badge += (f'<span class="badge warn" title="held in the ledger, absent from the '
-                  f'approval store">⚠ {stranded}</span>')
-    ribbon = ""
-    if _mode() == "sandbox":
-        public = os.environ.get("FREIGHT_PUBLIC_URL", "").strip()
-        chat = os.environ.get("FREIGHT_CHAT_URL", "").strip()
-        ribbon = ('<div class="ribbon">Sandbox — a disposable copy of the record. Approve and '
-                  "reject are live here; nothing decided in it reaches the governed desk."
-                  + (f'<a href="{esc(public)}">← public desk</a>' if public else "")
-                  + (f'<a href="{esc(chat)}">ask the fleet →</a>' if chat else "")
-                  + "</div>")
-    nav = (
-        ribbon
-        + '<div class="nav"><div class="in">'
-        '<span class="brand">Freight Ops<span class="long"> Fleet · Operator Console</span></span>'
-        '<span class="navlinks">'
-        + link("/", "Desk", "desk", badge)
-        + link("/ledger", "Ledger", "ledger")
-        + link("/fleet", "Fleet", "fleet")
-        + link("/evidence", "Evidence", "evidence")
-        + "</span></div></div>"
-    )
-    here, others = _surfaces()
-    if others:
-        nav += (
-            '<div class="surfaces"><div class="in">'
-            f'<span class="here">You are on <strong>{esc(here)}</strong></span>'
-            + "".join(
-                f'<a href="{esc(url)}">{esc(label)} <span class="note">· {esc(note)}</span> →</a>'
-                for label, url, note in others
-            )
-            + "</div></div>"
-        )
+    nav = nav_html(active, pending, stranded)
     foot = (
         '<div class="foot"><p>This console reads records. It never calls a model, and it ships '
-        "zero lines of JavaScript. The fleet runs from the CLI and the scheduled sweep "
-        '(<code>python -m freight_fleet.cli sweep</code>). The only write it can cause is a gated '
-        "replay through <code>before_tool_gate</code>, and every one of those lands in the ledger "
+        "zero lines of JavaScript. The fleet runs in Ask the fleet, from the CLI and in the scheduled "
+        'sweep (<code>python -m freight_fleet.cli sweep</code>). The only writes it can cause are gated '
+        "replays through <code>before_tool_gate</code>, and every one of those lands in the ledger "
         'you are reading.</p><p class="meta"><a href="/privacy">Privacy</a> · every shipment, party '
         "and figure on these pages is fictional.</p></div>"
     )
@@ -970,11 +952,15 @@ def _noun(path: str) -> str:
     return " ".join(words).lower()
 
 
-def action_sentence(tool: str, path: str, shipment: str, *, linked: bool = True) -> str:
+def action_sentence(tool: str, path: str, shipment: str, *, linked: bool = True,
+                    subject: str = "") -> str:
     """The verb phrase at the top of a decision: what the operator is being
     asked to authorise, in the order they would say it out loud."""
     noun = _noun(path)
     where = f" for {_derived(shipment, link=linked)}" if shipment else ""
+    if tool == "send_email":
+        what = f" — “{esc(subject)}”" if subject else ""
+        return f"Send an email{where}{what}"
     if tool == "write_file":
         article = "an" if noun[:1] in "aeiou" else "a"
         what = f"{article} {esc(noun)}" if noun else f"the file {esc(path)}"
@@ -1096,6 +1082,8 @@ class Hold:
     critical: str
     target: Target
     executable: bool
+    to: str = ""
+    subject: str = ""
 
     @property
     def ts(self) -> str:
@@ -1119,7 +1107,9 @@ def build_holds(entries: list[LedgerEntry], pending: dict[str, Any]) -> list[Hol
     for approval_id, payload in pending.items():
         args = payload.get("args") or {}
         path = str(args.get("path", ""))
-        draft = str(args.get("content", ""))
+        # A write carries `content`; a send carries `body`. Either is the draft
+        # the human is asked to authorise, and the card shows it the same way.
+        draft = str(args.get("content") or args.get("body") or "")
         i = index.get(approval_id)
         entry = entries[i] if i is not None else None
         shipment = derive_shipment(entries, i) if i is not None else ""
@@ -1130,6 +1120,7 @@ def build_holds(entries: list[LedgerEntry], pending: dict[str, Any]) -> list[Hol
             session=entry.session_id if entry else "", shipment=shipment, evidence=evidence,
             critical=derive_critical(draft), target=derive_target(path),
             executable=str(payload.get("tool", "")) in _TOOL_FNS,
+            to=str(args.get("to", "")), subject=str(args.get("subject", "")),
         ))
     holds.sort(key=lambda h: (0 if h.critical else 1, h.ts))
     return holds
@@ -1217,6 +1208,21 @@ def _flash(entries: list[LedgerEntry], pending: dict[str, Any], decided: str, wh
                 f"awaiting a decision; it was recorded as {esc(anchor.outcome.upper())} at "
                 f"{_time(anchor.ts)} UTC and nothing ran a second time. {link}</div></div>")
 
+    if executed and executed.tool == "send_email":
+        digest = executed.args_digest or {}
+        detail = executed.detail or ""
+        if "status=ok" not in detail:
+            return (f'<div class="strip s-blocked"><div class="body">'
+                    f"<strong>⚠ APPROVED, NOT DELIVERED</strong> {_time(executed.ts)} UTC — "
+                    f"send_email returned {esc(detail)}. The grant is spent; the message did not "
+                    f"leave. {link}</div></div>")
+        return (f'<div class="strip s-executed"><div class="body">'
+                f"<strong>✓ APPROVED</strong> {_time(executed.ts)} UTC — send_email executed.<br>"
+                f'“{esc(str(digest.get("subject", "")))}” delivered to the demo mailbox '
+                f'(drafted for <span class="mono">{esc(str(digest.get("to", "")))}</span>, not sent there).<br>'
+                'Grant retired — single-use. <a href="/sent">See it in Sent ↗</a> '
+                f"{link}</div></div>")
+
     if executed:
         path = str((executed.args_digest or {}).get("path", ""))
         target = derive_target(path)
@@ -1259,7 +1265,7 @@ def _flash(entries: list[LedgerEntry], pending: dict[str, Any], decided: str, wh
         return ('<div class="strip s-held"><div class="body">'
                 f"<strong>⚠ NOT EXECUTED</strong> — no executable body is wired for "
                 f"<span class=\"mono\">{esc(tool or 'that tool')}</span>. The hold stands and is "
-                "still on your desk. The fleet drafts; it never sends.</div></div>")
+                "still on your desk.</div></div>")
 
     if decided in pending:
         return ('<div class="strip s-held"><div class="body">'
@@ -1299,10 +1305,12 @@ def _queue_card(hold: Hold) -> str:
         f'<a class="qcard" href="/decision/{esc(hold.approval_id)}">'
         f'<div class="rowtop" style="justify-content:space-between">'
         f'{flag or "<span></span>"}{_pill(_STATES["held"])}</div>'
-        f'<div class="qtitle">{action_sentence(hold.tool, hold.path, hold.shipment, linked=False)}'
+        f'<div class="qtitle">{action_sentence(hold.tool, hold.path, hold.shipment, linked=False, subject=hold.subject)}'
         "</div>"
-        f'<div class="qpath">{esc(hold.path)} · {_derived(target, link=False)}</div>'
-        f'<div class="qmeta">held {_time(hold.ts)} UTC · {esc(hold.agent)} · '
+        + (f'<div class="qpath">to {esc(hold.to)} · {_derived("delivered to the demo mailbox on approval, never to that address", link=False)}</div>'
+           if hold.tool == "send_email" else
+           f'<div class="qpath">{esc(hold.path)} · {_derived(target, link=False)}</div>')
+        + f'<div class="qmeta">held {_time(hold.ts)} UTC · {esc(hold.agent)} · '
         f"{esc(_origin(hold.session))} · {_derived(docs, link=False)} · {chars}</div>"
         '<div class="qgo">Review →</div></a>'
     )
@@ -1388,8 +1396,16 @@ def _decided_recently(entries: list[LedgerEntry]) -> str:
     return f'<div class="band"><h2>Decided recently</h2>{items}</div>'
 
 
-@app.get("/", response_class=HTMLResponse)
-def desk(decided: str = "", why: str = "") -> HTMLResponse:
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    """The desk moved to /desk so that, behind the login, `/` can be the
+    homepage a stranger sees. A console served on its own still lands you
+    on the desk — one hop later."""
+    return RedirectResponse("/desk", status_code=303)
+
+
+@app.get("/desk", response_class=HTMLResponse)
+def desk(decided: str = "", why: str = "", run: str = "") -> HTMLResponse:
     """The Desk. A huge waiting count and one sentence — the first frame of the
     video has to be legible on a phone held at arm's length."""
     entries = load_ledger()
@@ -1398,12 +1414,15 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
     holds = build_holds(entries, pending)
     sweep = latest_sweep(entries)
     outbox = outbox_count()
+    sent = len(mail.list_sent())
     # The sweep's OWN stranded holds, not the fleet's — the brief makes a claim
     # about one run and must not borrow another run's divergence to support it.
     sweep_stranded = [st for st in recon.stranded
                       if sweep is not None and st.session_id == sweep.session]
 
     flash = _flash(entries, pending, decided, why) if decided else ""
+    if run:
+        flash += _sweep_flash(run)
 
     schedule = _sweep_schedule()
     schedule_line = (
@@ -1465,12 +1484,13 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
             '<div class="rest">'
             f'<div class="num"><div class="count2">{outbox}</div>'
             '<div class="label">In outbox</div></div>'
-            '<div class="num"><div class="count2">0</div>'
-            '<div class="label">Transmitted</div></div>'
+            f'<div class="num"><div class="count2">{sent}</div>'
+            '<div class="label"><a href="/sent">Transmitted</a></div></div>'
             "</div></div>"
             f'<p class="lede">{sentence}</p>{quickstart}'
-            '<p class="meta">send_email is classified CRITICAL and unwired — the constant 0 above '
-            "is a property of the fleet, not of today.</p>"
+            '<p class="meta">send_email is classified CRITICAL: every send is a human\'s click on '
+            'this desk, and delivery goes only to the operator\'s demo mailbox — never to the '
+            'address the fleet drafted. <a href="/sent">What has left ↗</a></p>'
             + schedule_line
             + "</div>"
         )
@@ -1482,40 +1502,34 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
     else:
         queue = ""
 
-    # The visitor brief renders ONLY on the read-only surface: the operator has
-    # a desk, a visitor needs a map. Three sentences, and the third one tells
-    # them to press the button that will refuse — the refusal is the demo.
-    visitor_brief = ""
-    if _readonly():
-        sb = _sandbox_url()
-        sandbox_line = (
-            f' To press it and feel it work, use the <a href="{esc(sb)}">sandbox</a> — the same '
-            "console on a disposable copy of the record." if sb else ""
-        )
-        visitor_brief = (
-            '<div class="brief"><span class="label" style="color:var(--accent)">First visit — '
-            "what you are looking at</span><ol>"
-            "<li>A scheduled fleet of freight agents cross-checked the open shipments' documents "
-            "unattended. Every discrepancy notice it drafted stopped at a policy gate — "
-            "<strong>held for a human, nothing sent, nothing written</strong>.</li>"
-            "<li>Open a decision below to see what the operator sees: the drafted notice, the "
-            "policy contract that held it, and the exact documents the agent read first.</li>"
-            "<li>Try Approve. This public surface refuses with a 403 — it is deployed so it "
-            "<em>cannot</em> decide; decisions happen on the operator's authenticated console, "
-            f'and every one lands in the <a href="/ledger">ledger</a>.{sandbox_line}</li>'
-            + (
-                f'<li>Want to ask the fleet something yourself? <a href="{esc(chat)}">Ask the fleet</a> '
-                "— sign in with any Google account, then enter the access code from the submission"
-                + (
-                    f', or use the <a href="{esc(demo)}">demo login</a> from the submission if you would '
-                    "rather not sign in"
-                    if (demo := os.environ.get("FREIGHT_CHAT_DEMO_URL", "").strip()) else ""
-                )
-                + ". Your conversation is yours alone and survives a reload.</li>"
-                if (chat := os.environ.get("FREIGHT_CHAT_URL", "").strip()) else ""
-            )
-            + "</ol></div>"
-        )
+    # The brief is for everyone: the operator has a desk, a first-time visitor
+    # needs a map, and three sentences cost the operator nothing.
+    chat = _chat_url()
+    ask = (
+        f'<li>Ask the fleet something yourself — <a href="{esc(chat)}">Ask the fleet</a>. A hold '
+        "raised in chat lands on this desk like any other, and your conversation survives a "
+        "reload.</li>"
+        if chat else ""
+    )
+    trigger = (
+        '<form method="post" action="/sweep/run" class="inline">'
+        '<button class="btn small" type="submit">Run the sweep now</button></form>'
+        '<p class="meta">The same unattended job Cloud Scheduler runs each morning. It takes a few '
+        "minutes; its holds appear here when it finishes.</p>"
+        if _sweep_job() else ""
+    )
+    visitor_brief = (
+        '<div class="brief"><span class="label" style="color:var(--accent)">How this desk works</span><ol>'
+        "<li>A scheduled fleet of freight agents cross-checks the open shipments' documents "
+        "unattended. Every correction notice it drafts stops at a policy gate — <strong>held for "
+        "a human, nothing sent</strong>.</li>"
+        "<li>Open a decision below: the drafted email, the contract that held it, and the exact "
+        "documents the agent read first. <strong>Approve</strong> sends it — to the demo mailbox, "
+        "never to the drafted address — and the row lands in the <a href=\"/ledger\">ledger</a>. "
+        "<strong>Reject</strong> retires it.</li>"
+        + ask
+        + "</ol>" + trigger + "</div>"
+    )
 
     body = (
         flash
@@ -1533,11 +1547,31 @@ def desk(decided: str = "", why: str = "") -> HTMLResponse:
                                stranded=len(recon.stranded)))
 
 
+def _sweep_flash(run: str) -> str:
+    """What a sweep trigger came back with. Four words, chosen by `webapp`;
+    every sentence here is the console's own."""
+    if run == "started":
+        return ('<div class="strip s-executed"><div class="body"><strong>✓ SWEEP STARTED</strong> — '
+                'the unattended job is running now. It reads every open shipment and holds what '
+                'it drafts; give it a few minutes, then <a href="/desk">refresh this desk</a>.'
+                '</div></div>')
+    if run == "busy":
+        return ('<div class="strip s-held"><div class="body"><strong>· ALREADY RUNNING</strong> — '
+                'a sweep is in progress or one started less than ten minutes ago. Nothing new '
+                'was started.</div></div>')
+    if run == "unavailable":
+        return ('<div class="strip s-neutral"><div class="body"><strong>· NOT AVAILABLE</strong> — '
+                'this deployment has no sweep job configured to trigger.</div></div>')
+    return ('<div class="strip s-blocked"><div class="body"><strong>⚠ NOT STARTED</strong> — the '
+            'job could not be started; the deployment log has the reason. Nothing changed.'
+            '</div></div>')
+
+
 # --- screen 2: the Decision --------------------------------------------------
 
 def _not_found(what: str, detail: str) -> HTMLResponse:
     body = (f"<h1>404 — {esc(what)}</h1><p class=\"lede\">{detail}</p>"
-            '<p><a href="/">← Back to the desk</a></p>')
+            '<p><a href="/desk">← Back to the desk</a></p>')
     return HTMLResponse(_shell(f"404 — {what}", body, show_footer=False), status_code=404)
 
 
@@ -1606,15 +1640,15 @@ def _exhibit(entry: LedgerEntry, entries: list[LedgerEntry], pending: dict[str, 
         f"{esc(entry.verdict).upper()} · held {esc(_stamp(entry.ts))}<br>"
         f"by {esc(entry.agent)} in session {esc(entry.session_id)}<br>"
         f"approval id {esc(entry.entry_id)}</span></div></div>"
-        f"<h1>{action_sentence(entry.tool, path, shipment)}</h1>"
-        f'<p class="mono">{esc(path)}</p>'
+        f"<h1>{action_sentence(entry.tool, path, shipment, subject=str((entry.args_digest or {}).get('subject', '')))}</h1>"
+        f'<p class="mono">{esc(path or str((entry.args_digest or {}).get("to", "")))}</p>'
         f'<div class="card">{note}'
         "<p>The draft is not available here: it lived in the approval store and was retired. The "
         f"ledger recorded its shape — {esc(str((entry.args_digest or {}).get('content_chars', '?')))} "
         "characters — not its body, because a 40 KB payload in an audit trail is noise.</p></div>"
         + recovery
         + f'<p><a href="/ledger#e-{esc(entry.entry_id)}">See this row in the record ↗</a> · '
-        '<a href="/">← Back to the desk</a></p>'
+        '<a href="/desk">← Back to the desk</a></p>'
     )
     return HTMLResponse(_shell("Decision — exhibit", body,
                                 pending=len(pending), stranded=stranded_count(entries)))
@@ -1649,32 +1683,56 @@ def decision(approval_id: str) -> HTMLResponse:
         f"{esc(hold.session)}<br>approval id {esc(hold.approval_id)}</span></div></div>"
     )
 
-    if hold.target.exists:
+    if hold.tool == "send_email":
+        overwrite = ""
+    elif hold.target.exists:
         overwrite = (f'<p style="color:var(--blocked)"><strong>⚠ THIS OVERWRITES</strong> an '
                      f"existing file ({_num(hold.target.size or 0)} bytes, modified "
                      f"{esc(hold.target.modified)}).</p>")
     else:
         overwrite = "<p>The file does not exist yet.</p>"
 
+    if hold.tool == "send_email":
+        where = mail.recipients(hold.to)
+        delivered = (", ".join(esc(w) for w in where) + " — plus a copy to you if you signed in with an "
+                     "email address") if where else (
+                     "the demo mailbox on this console (no outbound transport is configured), plus "
+                     "a copy to you if you signed in with an email address")
+        effect = (f"<p style=\"margin-top:12px\">send_email will deliver this message — "
+                  f"{_num(len(hold.draft))} characters, subject <em>{esc(hold.subject)}</em>.</p>"
+                  f'<p>The fleet addressed it to <span class="mono">{esc(hold.to)}</span>. It will '
+                  f"<strong>not</strong> go there: the model never chooses a real recipient. It goes to "
+                  f"{delivered}, with the drafted address recorded as intended.</p>"
+                  "<p>This is the one action in the fleet that leaves the building, and it cannot "
+                  "be undone — which is why it is the one you are being asked about.</p>")
+    else:
+        effect = (f"<p style=\"margin-top:12px\">{esc(hold.tool)} will create "
+                  f'<span class="mono">{esc(hold.path)}</span> — {_num(len(hold.draft))} characters.</p>'
+                  f"{overwrite}"
+                  "<p>Nothing is emailed by a write. The file lands in the fleet's workspace.</p>")
     contract = (
         '<div class="contract">'
-        f'<div class="card"><div class="label" style="color:var(--ink-3)">If you approve</div>'
-        f"<p style=\"margin-top:12px\">{esc(hold.tool)} will create "
-        f'<span class="mono">{esc(hold.path)}</span> — {_num(len(hold.draft))} characters.</p>'
-        f"{overwrite}"
-        "<p>Nothing is emailed. Nothing leaves this machine. The fleet has no send path.</p>"
+        '<div class="card"><div class="label" style="color:var(--ink-3)">If you approve</div>'
+        + effect +
         "<p>The grant is single-use: it buys this one execution and is retired immediately.</p>"
         "</div>"
         '<div class="card"><div class="label" style="color:var(--ink-3)">If you reject</div>'
-        '<p style="margin-top:12px">Nothing is written. The hold is recorded as REJECTED in the '
-        "ledger and cannot be replayed.</p></div></div>"
+        '<p style="margin-top:12px">Nothing is written and nothing is sent. The hold is recorded as '
+        "REJECTED in the ledger and cannot be replayed.</p></div></div>"
     )
 
+    header = (
+        f'<p class="meta"><span class="mono">To:</span> {esc(hold.to)}<br>'
+        f'<span class="mono">Subject:</span> {esc(hold.subject)}</p>'
+        if hold.tool == "send_email" else ""
+    )
     draft = (
-        "<h2>The draft</h2>"
-        f'<div class="draft">{md_lite(hold.draft)}</div>'
-        '<details class="raw"><summary>View the exact bytes that will be written '
-        f'<span class="meta">· {_num(draft_bytes)} bytes · sha256 {draft_sha}…</span></summary>'
+        ("<h2>The email</h2>" if hold.tool == "send_email" else "<h2>The draft</h2>")
+        + header
+        + f'<div class="draft">{md_lite(hold.draft)}</div>'
+        '<details class="raw"><summary>View the exact bytes that will be '
+        + ("sent " if hold.tool == "send_email" else "written ")
+        + f'<span class="meta">· {_num(draft_bytes)} bytes · sha256 {draft_sha}…</span></summary>'
         f"<div><pre>{esc(hold.draft)}</pre></div></details>"
     )
 
@@ -1700,17 +1758,15 @@ def decision(approval_id: str) -> HTMLResponse:
             '<div class="actions">'
             '<button class="btn" disabled>Approve — disabled</button>'
             '<button class="btn outline" disabled>Reject — disabled</button>'
-            '<p class="meta">READ-ONLY CONSOLE — decisions are enabled in the local instance.'
-            + (f' Buttons are live in the <a href="{esc(_sandbox_url())}">sandbox</a>.'
-               if _sandbox_url() else "")
-            + "</p></div>"
+            '<p class="meta">READ-ONLY CONSOLE — decisions are enabled on the signed-in console.'
+            "</p></div>"
         )
     elif not hold.executable:
         actions = (
             '<div class="actions">'
             f'<button class="btn" disabled>Approve — {esc(hold.tool)}</button>'
             f'<p class="meta">NOT EXECUTABLE — no executable body is wired for {esc(hold.tool)}. '
-            "The fleet drafts; it never sends.</p>"
+            "The hold stands until the tool is wired or the draft is rejected.</p>"
             f'<form method="post" action="/decision/{esc(hold.approval_id)}/reject">'
             '<button class="btn outline" type="submit">Reject — write nothing</button></form>'
             "</div>"
@@ -1719,9 +1775,14 @@ def decision(approval_id: str) -> HTMLResponse:
         actions = (
             '<div class="actions">'
             f'<form method="post" action="/decision/{esc(hold.approval_id)}/approve">'
-            f'<button class="btn" type="submit">Approve — write {esc(hold.path)}</button></form>'
-            f'<form method="post" action="/decision/{esc(hold.approval_id)}/reject">'
-            '<button class="btn outline" type="submit">Reject — write nothing</button></form>'
+            + ('<button class="btn" type="submit">Approve — send it</button></form>'
+               if hold.tool == "send_email" else
+               f'<button class="btn" type="submit">Approve — write {esc(hold.path)}</button></form>')
+            + f'<form method="post" action="/decision/{esc(hold.approval_id)}/reject">'
+            + ('<button class="btn outline" type="submit">Reject — send nothing</button></form>'
+               if hold.tool == "send_email" else
+               '<button class="btn outline" type="submit">Reject — write nothing</button></form>')
+            +
             '<p class="meta">The button is the confirmation. Approving replays the call through '
             "before_tool_gate; if the gate refuses, nothing runs.</p></div>"
         )
@@ -1735,11 +1796,58 @@ def decision(approval_id: str) -> HTMLResponse:
 
     body = (
         banner + flag
-        + f"<h1>{action_sentence(hold.tool, hold.path, hold.shipment)}</h1>"
+        + f"<h1>{action_sentence(hold.tool, hold.path, hold.shipment, subject=hold.subject)}</h1>"
         + contract + draft + evidence + actions
-        + '<p style="margin-top:24px"><a href="/">← Back to the desk</a></p>'
+        + '<p style="margin-top:24px"><a href="/desk">← Back to the desk</a></p>'
     )
     return HTMLResponse(_shell("Decision", body, pending=len(pending), stranded=stranded_count(entries)))
+
+
+# --- screen: Sent -------------------------------------------------------------
+
+@app.get("/sent", response_class=HTMLResponse)
+def sent() -> HTMLResponse:
+    """What actually left. One row per delivered message, newest first, read
+    from the mail spool — the only place a send is recorded in full. The ledger
+    row says a send ran; this page says what, to whom, approved by whom."""
+    entries = load_ledger()
+    pending = load_pending()
+    rows = mail.list_sent()
+    via = mail.transport()
+    how = (
+        f"Outbound transport: <strong>SMTP</strong>, delivering to {esc(mail.sink() or '(no sink set)')} "
+        "and to the approving human when they signed in with an address."
+        if via == "smtp" else
+        "Outbound transport: <strong>this page</strong>. No SMTP credentials are configured, so an "
+        "approved send is delivered here and nowhere else — the honest demo mailbox."
+    )
+    if not rows:
+        body = ("<h1>Sent</h1>"
+                f'<p class="lede">Nothing has left yet. {how}</p>'
+                '<p class="meta">A send appears here only after a human approves it on the '
+                '<a href="/desk">desk</a>; the fleet has no other way to transmit.</p>')
+    else:
+        cards = []
+        for r in rows:
+            if "_error" in r:
+                cards.append(f'<div class="card"><p class="meta" style="color:var(--blocked)">'
+                             f'⚠ {esc(r["_file"])} could not be read: {esc(r["_error"])}</p></div>')
+                continue
+            delivered = ", ".join(str(d) for d in (r.get("delivered_to") or [])) or "this page only"
+            cards.append(
+                '<div class="card" style="margin-bottom:12px">'
+                f'<h2>{esc(str(r.get("subject", "")))}</h2>'
+                f'<p class="meta">{esc(_stamp(str(r.get("ts", ""))))} · via {esc(str(r.get("transport", "")))} · '
+                f'approved by <span class="mono">{esc(str(r.get("approved_by") or "operator"))}</span></p>'
+                f'<p class="meta">drafted for <span class="mono">{esc(str(r.get("intended_to", "")))}</span> '
+                f'· delivered to <span class="mono">{esc(delivered)}</span></p>'
+                f'<div class="draft">{md_lite(str(r.get("body", "")))}</div></div>'
+            )
+        body = ("<h1>Sent</h1>"
+                f'<p class="lede">{len(rows)} message{"s" if len(rows) != 1 else ""} left the building, '
+                f"each one after a human's click. {how}</p>" + "".join(cards))
+    return HTMLResponse(_shell("Sent", body, active="sent", pending=len(pending),
+                                stranded=stranded_count(entries)))
 
 
 # --- privacy -----------------------------------------------------------------
@@ -1763,19 +1871,29 @@ def privacy() -> HTMLResponse:
         "back-office agents, built for a hackathon. Every shipment, company, person, price and "
         "document on these pages is fictional. This page says what the deployment records about "
         "<em>you</em>, which is little, and why.</p>"
-        '<p class="meta">Effective 2026-08-28 · applies to the public console, the sandbox and the '
-        '"Ask the fleet" chat.</p>'
-        "<h2>The public console and the sandbox</h2>"
-        "<p>They have no accounts, no sign-in and set no cookies. Like any web service they leave "
-        "standard request logs (IP address, browser user agent, path, time) in Google Cloud "
-        "Logging under Google Cloud's default retention, used only to keep the service running. "
-        "What you click in the sandbox is written to a disposable copy of the record that is "
-        "reset by the operator and never leaves it.</p>"
+        '<p class="meta">Effective 2026-08-29 · applies to the homepage, the sign-in and everything '
+        'behind it: the operator desk and the "Ask the fleet" chat.</p>'
+        "<h2>Before you sign in</h2>"
+        "<p>The homepage and this page have no accounts and set no cookies. Like any web service "
+        "they leave standard request logs (IP address, browser user agent, path, time) in Google "
+        "Cloud Logging under Google Cloud's default retention, used only to keep the service "
+        "running.</p>"
+        "<h2>Signing in</h2>"
+        "<p>There are two ways in. A <strong>demo username</strong> issued by the operator: the "
+        "username is your identity here and nothing else about you is collected. Or "
+        "<strong>Google sign-in</strong> plus an invite code: the deployment receives the "
+        "<strong>email address of the Google account you chose</strong> and uses it as your "
+        "identity, so that your conversation is yours alone and can be resumed later; Google's "
+        "own sign-in terms govern the sign-in itself. Either way one cookie is set — a signed "
+        "session token, seven days, nothing tracked with it.</p>"
+        "<h2>What you do on the desk</h2>"
+        "<p>Approving or rejecting a drafted action writes a row to the audit ledger that names "
+        "your identity as the decider. Approving a send delivers the message to the operator's "
+        "demo mailbox and — if you signed in with Google — a copy to your address; never to the "
+        "fictional address the fleet drafted. Documents you upload are transcribed by the model "
+        "and kept in the fleet's workspace for the demonstration period; do not upload anything "
+        "real or confidential.</p>"
         "<h2>The chat (“Ask the fleet”)</h2>"
-        "<p>The chat sits behind Google sign-in (Identity-Aware Proxy). When you sign in, the "
-        "deployment receives the <strong>email address of the Google account you chose</strong> "
-        "and uses it as your identity, so that your conversation is yours alone and can be "
-        "resumed later. Google's own sign-in terms govern the sign-in itself.</p>"
         "<p>The <strong>messages you type and the replies you receive</strong> are stored in a "
         "database in the operator's Google Cloud project so the conversation can continue across "
         "visits. Messages are sent to Google Cloud's Vertex AI (Gemini) to produce the replies, "
@@ -1783,17 +1901,17 @@ def privacy() -> HTMLResponse:
         "kept: the chat is a demonstration, not a confidential channel.</p>"
         "<h2>What is not done</h2>"
         "<p>No data is sold, shared with advertisers, or passed to any third party other than "
-        "Google Cloud as the hosting and model provider. No cookies of our own, no tracking "
-        "pixels, no analytics scripts — these pages ship zero JavaScript. Nothing about you "
-        "is used to train a model.</p>"
+        "Google Cloud as the hosting and model provider. No tracking cookies, no pixels, no "
+        "analytics scripts — the console pages ship zero JavaScript and the chat page ships only "
+        "its own. Nothing about you is used to train a model.</p>"
         "<h2>Retention and deletion</h2>"
-        "<p>Chat conversations and the sign-in emails attached to them are kept for the "
+        "<p>Chat conversations, uploads, ledger rows and the sign-in identities attached to them are kept for the "
         "demonstration period and deleted when the chat service is taken down. To have yours "
         f'deleted sooner, email <a href="mailto:{esc(contact)}">{esc(contact)}</a> from the '
         "account you signed in with.</p>"
         "<h2>Contact</h2>"
         f'<p>Questions about this page: <a href="mailto:{esc(contact)}">{esc(contact)}</a>.</p>'
-        '<p style="margin-top:24px"><a href="/">← Back to the desk</a></p>'
+        '<p style="margin-top:24px"><a href="/desk">← Back to the desk</a></p>'
     )
     return HTMLResponse(_shell("Privacy", body, show_footer=False))
 
@@ -1807,12 +1925,6 @@ def _forbidden() -> HTMLResponse:
     one job: say that the refusal is structural — a deployment property, not a
     disabled button — because on an open URL a working approve would make any
     stranger the human in the loop."""
-    sb = _sandbox_url()
-    sandbox = (
-        f'<p class="lede">To press the button and feel it work, use the <a href="{esc(sb)}">'
-        "sandbox</a> — the same console, live buttons, a disposable copy of the record.</p>"
-        if sb else ""
-    )
     body = ('<p class="label" style="color:var(--blocked)">403 · Structurally refused</p>'
             '<div class="statement">This surface cannot decide.</div>'
             '<p class="lede">READ-ONLY CONSOLE — no approval was granted, no store was touched '
@@ -1822,8 +1934,7 @@ def _forbidden() -> HTMLResponse:
             "loop — so the public surface is configured so that it cannot act at all. Decisions "
             "happen on the operator's authenticated console, through the same gate the agent "
             "hit.</p>"
-            + sandbox +
-            '<p><a href="/">← Back to the desk</a></p>')
+            +            '<p><a href="/desk">← Back to the desk</a></p>')
     return HTMLResponse(_shell("403 — read-only", body, show_footer=False), status_code=403)
 
 
@@ -1856,7 +1967,7 @@ def _known(approval_id: str, pending: dict[str, Any], entries: list[LedgerEntry]
 
 
 @app.post("/decision/{approval_id}/approve")
-def approve(approval_id: str):
+def approve(approval_id: str, request: Request):
     """The console's ONLY write path. It grants and then replays through
     `before_tool_gate` — the identical function `cli approvals grant` calls."""
     if _readonly():
@@ -1867,19 +1978,27 @@ def approve(approval_id: str):
     pending = store.pending()
     if not _known(approval_id, pending, load_ledger()):
         return _not_found("Not in evidence", "No held action carries this id.")
-    result = execute_approved(
-        approval_id,
-        ledger=Ledger(_ledger_path()),
-        approvals=store,
-        tool_fns=_TOOL_FNS,
-        source=SOURCE,
-    )
-    return RedirectResponse(f"/?decided={quote(approval_id)}&why={quote(result.status)}",
+    actor = _who(request)
+    # The approver's identity rides into `send_email` through a contextvar, so a
+    # judge who signed in with an address gets the copy — see tools/mail.py.
+    token = mail.APPROVER.set(actor if "@" in actor else "")
+    try:
+        result = execute_approved(
+            approval_id,
+            ledger=Ledger(_ledger_path()),
+            approvals=store,
+            tool_fns=_TOOL_FNS,
+            source=SOURCE,
+            actor=actor,
+        )
+    finally:
+        mail.APPROVER.reset(token)
+    return RedirectResponse(f"/desk?decided={quote(approval_id)}&why={quote(result.status)}",
                             status_code=303)
 
 
 @app.post("/decision/{approval_id}/reject")
-def reject(approval_id: str):
+def reject(approval_id: str, request: Request):
     """Retire a hold without running it. Nothing is written, ever."""
     if _readonly():
         return _forbidden()
@@ -1894,8 +2013,9 @@ def reject(approval_id: str):
         ledger=Ledger(_ledger_path()),
         approvals=store,
         source=SOURCE,
+        actor=_who(request),
     )
-    return RedirectResponse(f"/?decided={quote(approval_id)}&why={quote(result.status)}",
+    return RedirectResponse(f"/desk?decided={quote(approval_id)}&why={quote(result.status)}",
                             status_code=303)
 
 
@@ -2184,7 +2304,7 @@ def fleet() -> HTMLResponse:
                         + "".join(blocks) + "</div>")
 
     tool_rows = "".join(
-        f"<tr><td class=\"mono\">{'<s>' + esc(spec.name) + '</s>' if spec.name == 'send_email' else esc(spec.name)}</td>"
+        f'<tr><td class="mono">{esc(spec.name)}</td>'
         f'<td class="mono">{esc(spec.risk.value.upper())}</td>'
         f'<td class="mono">{"external ✓" if spec.external_side_effect else "—"}</td>'
         f'<td class="mono">{esc(policy.classify(spec.name)[1].value.upper())}</td>'
@@ -2449,7 +2569,7 @@ def doc(path: str = "") -> HTMLResponse:
                      f'<span class="mono">{esc(path)}</span> '
                      f'({esc(result.get("status", "unknown"))}).</p></div>')
         body = (f"<h1>{esc(path)}</h1><p class=\"meta\">{provenance}</p>{panel}"
-                '<p><a href="/">← Back to the desk</a></p>')
+                '<p><a href="/desk">← Back to the desk</a></p>')
         return HTMLResponse(_shell(Path(path).name, body,
                                     pending=len(pending), stranded=stranded_count(entries)))
 
@@ -2469,6 +2589,6 @@ def doc(path: str = "") -> HTMLResponse:
         f"{rendered}"
         '<details class="raw"><summary>Raw text</summary>'
         f'<div><pre>{esc(text)}</pre></div></details>'
-        '<p style="margin-top:24px"><a href="/">← Back to the desk</a></p>'
+        '<p style="margin-top:24px"><a href="/desk">← Back to the desk</a></p>'
     )
     return HTMLResponse(_shell(Path(path).name, body, pending=len(pending), stranded=stranded_count(entries)))

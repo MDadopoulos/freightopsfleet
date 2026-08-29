@@ -163,7 +163,7 @@ def test_the_wrong_code_is_a_403_with_no_cookie():
 def test_next_cannot_leave_the_origin():
     gate = AccessCodeMiddleware(EchoApp(), CODE)
     for evil in ("https://evil.example/", "//evil.example", "/\\evil.example", ""):
-        assert header(login(gate, CODE, evil), b"location") == "/chat"
+        assert header(login(gate, CODE, evil), b"location") == "/desk"
 
 
 # --- the cookie --------------------------------------------------------------
@@ -232,14 +232,10 @@ def test_create_app_puts_the_gate_inside_the_iap_layer(monkeypatch):
     assert isinstance(app.app, AccessCodeMiddleware) and app.app.code == CODE
 
 
-def test_the_form_points_visitors_without_a_code_somewhere_useful(monkeypatch):
-    monkeypatch.setenv("FREIGHT_PUBLIC_URL", "https://public.test")
-    monkeypatch.setenv("FREIGHT_SANDBOX_URL", "https://sandbox.test")
-    page = drive(AccessCodeMiddleware(EchoApp(), CODE), scope("/access"))[1]["body"].decode()
-    assert 'href="https://public.test"' in page and 'href="https://sandbox.test"' in page
-    monkeypatch.delenv("FREIGHT_PUBLIC_URL")
-    monkeypatch.delenv("FREIGHT_SANDBOX_URL")
-    assert "No code?" not in drive(AccessCodeMiddleware(EchoApp(), CODE), scope("/access"))[1]["body"].decode()
+def test_code_mode_never_serves_a_homepage():
+    """An invite code alone is the shape behind IAP: something else owns `/`."""
+    gate = AccessCodeMiddleware(EchoApp(), CODE)
+    assert status(drive(gate, scope("/"))) == 303
 
 
 # --- demo login (users mode) -------------------------------------------------
@@ -279,8 +275,9 @@ def test_load_users_normalizes_names_and_rejects_nonsense():
 def test_users_mode_form_asks_for_username_and_password():
     gate, _ = users_gate()
     page = drive(gate, scope("/access"))[1]["body"].decode()
-    assert gate.mode == "users"
+    assert gate.mode == "gated"
     assert 'name="username"' in page and 'name="password"' in page and 'name="code"' not in page
+    assert "Continue with Google" not in page, "no client configured, no Google panel"
     assert "<script" not in page
 
 
@@ -318,13 +315,141 @@ def test_users_mode_login_pins_the_username_into_every_user_id():
 def test_users_cookie_is_bound_to_the_user_table():
     gate, pw = users_gate()
     jar = cookie_from(user_login(gate, "judge1", pw["judge1"]))
-    forged = jar.replace("judge1.", "judge2.", 1)
+    forged = f"{COOKIE}={gate.issue('judge3')}"  # signed with the real key, for a name not in the table
     assert status(drive(gate, scope("/dev-ui/", headers=[(b"cookie", forged.encode())]))) == 303
     rotated, _ = users_gate()  # a new table: different key, every old cookie dies
     assert status(drive(rotated, scope("/dev-ui/", headers=[(b"cookie", jar.encode())]))) == 303
 
 
-def test_a_code_is_ignored_when_users_are_configured():
+def test_a_code_alongside_users_is_kept_for_the_google_door_only():
     table, _ = mint_users(["judge1"])
     gate = AccessCodeMiddleware(EchoApp(), code="FLEET-1", users=table)
-    assert gate.mode == "users" and gate.code is None
+    assert gate.mode == "gated" and gate.code == "FLEET-1"
+    # the password form does not take a code, and a code alone opens nothing
+    assert status(login(gate, "FLEET-1")) == 403
+
+
+# --- the one door: homepage, sign-out, identity header, Google -----------------
+
+from urllib.parse import parse_qs, urlparse
+
+from freight_fleet.access import GoogleSignIn
+
+
+class Recorder(EchoApp):
+    """Echoes, and keeps every scope so a test can read what reached the app."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scopes: list[dict] = []
+
+    async def __call__(self, scope, receive, send):
+        self.scopes.append(scope)
+        await super().__call__(scope, receive, send)
+
+
+def google_gate(code=CODE, exchange=None, clock=None):
+    table, passwords = mint_users(["judge1"])
+    g = GoogleSignIn("cid.apps.googleusercontent.com", "secret", "https://fleet.test/auth/google/callback",
+                     exchange=exchange or (lambda c: {"email": "Judge@Gmail.test", "email_verified": True}))
+    kw = {"clock": clock} if clock else {}
+    inner = Recorder()
+    return AccessCodeMiddleware(inner, code=code, users=table, google=g, **kw), inner, passwords
+
+
+def state_of(start: list[dict]) -> str:
+    return parse_qs(urlparse(header(start, b"location")).query)["state"][0]
+
+
+def test_the_gated_root_is_a_homepage_and_the_desk_needs_a_login():
+    gate, inner, _ = google_gate()
+    sent = drive(gate, scope("/"))
+    assert status(sent) == 200 and inner.hits == 0
+    page = sent[1]["body"].decode()
+    assert "Sign in" in page and 'href="/access"' in page and 'href="/privacy"' in page and "<script" not in page
+    assert header(drive(gate, scope("/desk")), b"location").startswith("/access?next=%2Fdesk")
+    # the privacy page and the probes need no cookie; the app sees no identity header
+    assert status(drive(gate, scope("/privacy", headers=[(b"x-fleet-identity", b"forged")]))) == 200
+    assert not any(k == b"x-fleet-identity" for k, _ in inner.scopes[-1]["headers"])
+
+
+def test_the_login_page_offers_both_doors():
+    gate, _, _ = google_gate()
+    page = drive(gate, scope("/access"))[1]["body"].decode()
+    assert 'name="username"' in page and 'action="/auth/google"' in page and 'name="code"' in page
+    assert "Continue with Google" in page and "<script" not in page
+
+
+def test_a_demo_login_sets_the_identity_header_and_strips_a_forged_one():
+    gate, inner, passwords = google_gate()
+    jar = cookie_from(user_login(gate, "judge1", passwords["judge1"]))
+    drive(gate, scope("/desk", headers=[(b"cookie", jar.encode()), (b"x-fleet-identity", b"root")]))
+    hdrs = dict(inner.scopes[-1]["headers"])
+    assert hdrs[b"x-fleet-identity"] == b"judge1" and hdrs[b"x-fleet-kind"] == b"u"
+    page = drive(gate, scope("/", headers=[(b"cookie", jar.encode())]))[1]["body"].decode()
+    assert "Signed in as <strong>judge1" in page and 'href="/desk"' in page
+
+
+def test_sign_out_clears_the_cookie_and_goes_home():
+    gate, _, _ = google_gate()
+    sent = drive(gate, scope("/logout"))
+    assert status(sent) == 303 and header(sent, b"location") == "/"
+    assert "Max-Age=0" in header(sent, b"set-cookie")
+
+
+def test_google_needs_the_invite_code_before_the_round_trip():
+    gate, inner, _ = google_gate()
+    sent = drive(gate, scope("/auth/google", method="POST"), b"code=WRONG&next=%2Fchat")
+    assert status(sent) == 403 and inner.hits == 0
+    sent = drive(gate, scope("/auth/google", method="POST"), f"code={quote(CODE)}&next=%2Fchat".encode())
+    assert status(sent) == 303
+    loc = header(sent, b"location")
+    assert loc.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+    assert "client_id=cid.apps.googleusercontent.com" in loc and "state=" in loc and "scope=openid+email" in loc
+
+
+def test_the_callback_verifies_state_then_pins_the_verified_email():
+    clock = Clock()
+    gate, inner, _ = google_gate(clock=clock)
+    start = drive(gate, scope("/auth/google", method="POST"), f"code={quote(CODE)}&next=%2Fchat".encode())
+    state = state_of(start)
+
+    forged = drive(gate, scope("/auth/google/callback", query=b"code=abc&state=nonsense.sig"))
+    assert status(forged) == 403 and header(forged, b"set-cookie") is None
+
+    sent = drive(gate, scope("/auth/google/callback", query=f"code=abc&state={quote(state)}".encode()))
+    assert status(sent) == 303 and header(sent, b"location") == "/chat"
+    jar = cookie_from(sent)
+    assert gate.parse(jar.split("=", 1)[1]) == ("g", "judge@gmail.test")
+    drive(gate, scope("/apps/freight_ops/users/me/sessions", headers=[(b"cookie", jar.encode())]))
+    assert inner.scopes[-1]["path"] == "/apps/freight_ops/users/judge%40gmail.test/sessions"
+    assert dict(inner.scopes[-1]["headers"])[b"x-fleet-identity"] == b"judge@gmail.test"
+
+    clock.now += 11 * 60
+    late = drive(gate, scope("/auth/google/callback", query=f"code=abc&state={quote(state)}".encode()))
+    assert status(late) == 403, "a state older than ten minutes is refused"
+
+
+def test_an_unverified_or_failed_google_account_is_refused():
+    gate, _, _ = google_gate(exchange=lambda c: {"email": "x@y.test", "email_verified": False})
+    start = drive(gate, scope("/auth/google", method="POST"), f"code={quote(CODE)}".encode())
+    sent = drive(gate, scope("/auth/google/callback", query=f"code=abc&state={quote(state_of(start))}".encode()))
+    assert status(sent) == 403 and header(sent, b"set-cookie") is None
+
+    def boom(c):
+        raise ValueError("nope")
+
+    gate, _, _ = google_gate(exchange=boom)
+    start = drive(gate, scope("/auth/google", method="POST"), f"code={quote(CODE)}".encode())
+    sent = drive(gate, scope("/auth/google/callback", query=f"code=abc&state={quote(state_of(start))}".encode()))
+    assert status(sent) == 403
+
+
+def test_rotating_the_client_id_invalidates_google_cookies():
+    gate, _, _ = google_gate()
+    jar = gate.issue("judge@gmail.test", "g")
+    assert gate.session(jar) == "judge@gmail.test"
+    table, _ = mint_users(["judge1"])
+    rotated = AccessCodeMiddleware(EchoApp(), code=CODE, users=table,
+                                   google=GoogleSignIn("other-client", "s", "https://fleet.test/cb"))
+    assert rotated.session(jar) is None

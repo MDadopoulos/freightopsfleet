@@ -37,9 +37,9 @@ USER fleet
 
 EXPOSE 8080
 
-# Default: the OPERATOR CONSOLE. A judge visiting the URL should land on the
-# Desk, not on an API index — and the console needs no GOOGLE_API_KEY to render,
-# so the live URL cannot 500 on credentials or burn quota.
-# The sweep Job still overrides this with `--command`; `adk api_server` /
-# `adk web` remain the local dev entry point for talking to the fleet.
-CMD ["sh", "-c", "uvicorn freight_fleet.console:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# Default: the whole application behind one login (`webapp.py`): the operator
+# desk, the chat, uploads and ADK's API in one process. With no credentials
+# configured the login is off and the desk is at /desk, which is the local shape.
+# The sweep Job overrides this with `--command`; `python -m freight_fleet.cli
+# console` still serves the console alone, with no model code loaded.
+CMD ["sh", "-c", "uvicorn freight_fleet.webapp:app_factory --factory --host 0.0.0.0 --port ${PORT:-8080}"]

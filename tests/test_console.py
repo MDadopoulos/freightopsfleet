@@ -107,8 +107,8 @@ def world(tmp_path, monkeypatch):
 
 # --- every screen renders ----------------------------------------------------
 
-@pytest.mark.parametrize("path", ["/", "/ledger", "/ledger.jsonl", "/fleet", "/evidence",
-                                  "/healthz"])
+@pytest.mark.parametrize("path", ["/", "/desk", "/ledger", "/ledger.jsonl", "/sent", "/fleet",
+                                  "/evidence", "/healthz"])
 def test_every_route_renders(world, path):
     assert world.client.get(path).status_code == 200
 
@@ -463,31 +463,98 @@ def test_privacy_page_is_public_static_and_true(monkeypatch):
     assert 'href="/privacy"' in TestClient(console.app).get("/").text
 
 
-def test_surface_switcher_says_where_you_are_and_where_else_to_go(monkeypatch):
-    """Every surface names itself and links the others, from env alone. Without
-    the env there is no strip: a local operator has nowhere else to go."""
+def test_the_nav_offers_the_chat_and_a_sign_out_from_env_alone(monkeypatch):
+    """One nav for every page. The chat link and the sign-out come from env: a
+    console served on its own has no chat to link and no session to end."""
     from freight_fleet import console
 
-    for var in ("FREIGHT_PUBLIC_URL", "FREIGHT_SANDBOX_URL", "FREIGHT_CHAT_URL", "FREIGHT_REPO_URL"):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.delenv("FREIGHT_CONSOLE_MODE", raising=False)
-    monkeypatch.setenv("FREIGHT_CONSOLE_READONLY", "1")
-    assert 'class="surfaces"' not in TestClient(console.app).get("/").text
+    monkeypatch.delenv("FREIGHT_CHAT_URL", raising=False)
+    monkeypatch.delenv("FREIGHT_GATED", raising=False)
+    page = TestClient(console.app).get("/desk").text
+    assert 'href="/chat"' not in page and 'href="/logout"' not in page
+    assert 'href="/sent"' in page and 'href="/desk"' in page
 
-    monkeypatch.setenv("FREIGHT_SANDBOX_URL", "https://sandbox.test")
-    monkeypatch.setenv("FREIGHT_CHAT_URL", "https://chat.test")
-    monkeypatch.setenv("FREIGHT_REPO_URL", "https://github.test/repo")
-    page = TestClient(console.app).get("/").text
-    assert "You are on <strong>Public desk" in page
-    assert 'href="https://sandbox.test"' in page and 'href="https://chat.test"' in page
-    assert "Google sign-in + access code" in page
-    assert "Want to ask the fleet something yourself?" in page, "the brief gets a fourth step"
+    monkeypatch.setenv("FREIGHT_CHAT_URL", "/chat")
+    monkeypatch.setenv("FREIGHT_GATED", "1")
+    page = TestClient(console.app).get("/desk").text
+    assert 'href="/chat"' in page and "Ask the fleet" in page
+    assert 'href="/logout"' in page
+    assert "How this desk works" in page, "the brief is for everyone now"
+    assert "/sweep/run" not in page, "no job configured, no button"
+    monkeypatch.setenv("FREIGHT_SWEEP_JOB", "projects/p/locations/r/jobs/j")
+    assert 'action="/sweep/run"' in TestClient(console.app).get("/desk").text
 
-    # The real sandbox is writable: a read-only sandbox is not a deployment.
-    monkeypatch.delenv("FREIGHT_CONSOLE_READONLY")
-    monkeypatch.setenv("FREIGHT_CONSOLE_MODE", "sandbox")
-    monkeypatch.setenv("FREIGHT_PUBLIC_URL", "https://public.test")
-    page = TestClient(console.app).get("/").text
-    assert "You are on <strong>Sandbox" in page
-    assert 'href="https://sandbox.test"' not in page, "a surface never links to itself"
-    assert "← public desk" in page and "ask the fleet →" in page, "the ribbon links out"
+
+def test_the_root_lands_on_the_desk():
+    from freight_fleet import console
+
+    r = TestClient(console.app).get("/", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/desk"
+
+
+# --- send_email on the desk ---------------------------------------------------
+
+@pytest.fixture()
+def held_send(world, monkeypatch):
+    """The world plus one held send, and a spool the test owns."""
+    from freight_fleet.governance.gate import FileApprovalStore
+
+    monkeypatch.setenv("FREIGHT_MAIL_SPOOL", str(world.tmp / "sent"))
+    monkeypatch.delenv("FREIGHT_MAIL_TRANSPORT", raising=False)
+    monkeypatch.delenv("FREIGHT_MAIL_SINK", raising=False)
+    gate = make_before_tool_gate(world.ledger, FileApprovalStore(world.tmp / "approvals.json"),
+                                 "sweep-2026-08-21")
+    gate(_Tool("read_file"), {"path": "shipments/shp-t01/waybill.md"}, _Ctx())
+    held = gate(_Tool("send_email"), {"to": "ops@carrier.example",
+                                      "subject": "[BK4471] Discrepancy notice",
+                                      "body": "Dear team,\n\nthe weights differ.\n"}, _Ctx())
+    return held["approval_id"]
+
+
+def test_a_held_send_is_a_send_on_every_screen(world, held_send):
+    desk = world.client.get("/desk").text
+    assert "Send an email" in desk and "Discrepancy notice" in desk
+    assert "never to that address" in desk
+    page = world.client.get(f"/decision/{held_send}").text
+    assert "Approve — send it" in page and "Reject — send nothing" in page
+    assert "ops@carrier.example" in page and "will <strong>not</strong> go there" in page
+    assert "The email" in page and "<script" not in page
+
+
+def test_approving_a_send_delivers_to_the_spool_and_names_the_approver(world, held_send):
+    from freight_fleet.tools import mail
+
+    r = world.client.post(f"/decision/{held_send}/approve", headers={"x-fleet-identity": "judge2"})
+    assert r.status_code == 200 and "send_email executed" in r.text
+    rows = list(world.ledger.read())
+    assert [x.outcome for x in rows[-2:]] == ["approved", "executed"]
+    assert "by judge2" in rows[-1].detail and "status=ok" in rows[-1].detail
+    sent = mail.list_sent()
+    assert len(sent) == 1
+    assert sent[0]["intended_to"] == "ops@carrier.example"
+    assert sent[0]["delivered_to"] == [], "no sink, no approver address: the spool is the mailbox"
+    assert sent[0]["approved_by"] == ""
+    page = world.client.get("/sent").text
+    assert "Discrepancy notice" in page and "ops@carrier.example" in page and "1 message left" in page
+    # the desk's transmitted count is a fact now
+    assert 'count2">1</div>' in world.client.get("/desk").text
+
+
+def test_an_approver_with_an_address_gets_the_copy(world, held_send, monkeypatch):
+    from freight_fleet.tools import mail
+
+    monkeypatch.setenv("FREIGHT_MAIL_SINK", "demo@example.test")
+    world.client.post(f"/decision/{held_send}/approve", headers={"x-fleet-identity": "judge@gmail.test"})
+    sent = mail.list_sent()[0]
+    assert sent["delivered_to"] == ["demo@example.test", "judge@gmail.test"]
+    assert sent["approved_by"] == "judge@gmail.test"
+    assert "ops@carrier.example" not in sent["delivered_to"]
+
+
+def test_rejecting_a_send_sends_nothing(world, held_send):
+    from freight_fleet.tools import mail
+
+    r = world.client.post(f"/decision/{held_send}/reject", headers={"x-fleet-identity": "judge1"})
+    assert r.status_code == 200 and "REJECTED" in r.text
+    assert mail.list_sent() == []
+    assert "by judge1" in list(world.ledger.read())[-1].detail
