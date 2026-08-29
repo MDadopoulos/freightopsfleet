@@ -727,7 +727,7 @@ deployed.
 
 **Use the `--update-` forms for every change after the first deploy.**
 `--set-secrets` and `--set-env-vars` replace the entire set; `--update-secrets`
-and `--update-env-vars` merge. The Service carries three secrets and sixteen
+and `--update-env-vars` merge. The Service carries three secrets and seventeen
 environment variables, and retyping all of them correctly to change one is how
 this deployment gets broken.
 
@@ -1186,7 +1186,7 @@ gcloud run jobs update "$JOB" --region "$REGION" \
 
 The Service is not simple, and this is where people break it. `--clear-secrets`
 would also unmount the session URI, the user table and the invite code, and
-`--set-env-vars` would drop the sixteen variables §4.3 set. Remove only the key,
+`--set-env-vars` would drop the seventeen variables §4.3 set. Remove only the key,
 and merge:
 
 ```bash
@@ -1646,7 +1646,7 @@ behind.
 | `403 Permission denied` on a Vertex call | Service account lacks the role | `roles/aiplatform.user` on `$SA` — §7a. Also check `aiplatform.googleapis.com` is enabled. |
 | `Could not resolve project using application default credentials` | No ADC on the machine | Locally: `gcloud auth application-default login`. On Cloud Run: the service was deployed without `--service-account`. |
 | SDK logs that it chose one credential over another | Both `GOOGLE_API_KEY` and the Vertex variables are set | Expected precedence, but ambiguous billing. Remove the key — §7a. |
-| Env vars or secrets you set earlier vanished after an update | `--set-env-vars` / `--set-secrets` replace the whole set | Use `--update-env-vars` / `--update-secrets` to merge. The Service carries three secrets and sixteen env vars; retyping them all to change one is how this breaks. |
+| Env vars or secrets you set earlier vanished after an update | `--set-env-vars` / `--set-secrets` replace the whole set | Use `--update-env-vars` / `--update-secrets` to merge. The Service carries three secrets and seventeen env vars; retyping them all to change one is how this breaks. |
 | The desk shows old state for up to a minute after a `gcloud storage cp` into the bucket | GCS-FUSE metadata cache (60s TTL) on the reader | Wait a minute, or deploy a new revision. Writes the container makes itself are visible to it immediately. Not data loss. |
 | Request dies at ~5 minutes | Cloud Run's default 300s timeout | `--timeout 600` — §4.3. |
 | `gcloud run deploy` fails with no Dockerfile / nothing to build | Not run from the repo root | `--source .` uploads the current directory — `cd` into the clone first. See §0. |
