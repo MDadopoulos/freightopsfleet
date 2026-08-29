@@ -1,42 +1,53 @@
 # Deploying to Google Cloud
 
-Three kinds of thing get deployed, from **one image**:
+**One image, two deployments.**
 
 | What | Cloud Run kind | Why it exists |
 |---|---|---|
-| **The operator console** | Service (a live URL) | The image's default `CMD`. A judge clicking the URL lands on the Desk — the pending count, the decision queue, the ledger, the catalog and the scoreboard — with **no `GOOGLE_API_KEY` required**, no model call, and therefore no way to burn quota or 500 on credentials. §4 deploys it read-only, §4a again behind IAM where the buttons work, §4c a third time as a public sandbox. |
-| **The morning sweep** | Job + Cloud Scheduler | The track's async requirement: it runs at 06:00 with nobody watching, finds discrepancies, and **holds** every draft. |
-| **The chat surface** | Service behind IAP | §4d. ADK's dev UI, so a judge can *ask* the fleet something instead of only reading what it already did — behind Google sign-in, with per-user sessions in Cloud SQL that survive the container. It is the only surface a stranger can spend model tokens on, which is why it is the only one that requires a sign-in. |
-
-> **The default `CMD` changed.** It is now
-> `uvicorn freight_fleet.console:app --host 0.0.0.0 --port ${PORT:-8080}`.
-> To serve ADK's API instead, override it:
-> `--command sh --args="-c,adk api_server --host 0.0.0.0 --port \${PORT:-8080} /app/agents"`
-> (the `=` is load-bearing — see §5).
-> Both live in one image; only the entry point differs.
->
-> **`FREIGHT_CONSOLE_READONLY=1`** disables both decision buttons and returns
-> `403` for either POST, touching neither the approval store nor the ledger. It
-> is the entire access model, and it is the right setting for a public
-> submission URL: the console is then a pure exhibit. Approvals stay on the
-> local CLI, where the durable store actually lives.
+| **The fleet** | Service (a live URL) | §4. One door for everything a visitor can do: the homepage, the login, the operator desk, the chat, document upload, and the button that starts the sweep. One process, one URL, one ledger. |
+| **The morning sweep** | Job + Cloud Scheduler | §5 and §6. The track's async requirement: it runs at 06:00 with nobody watching, cross-checks every open shipment, drafts the correction emails and **holds** every one of them. |
 
 They share an image on purpose. The agent that answers an operator at 14:00 and
 the one that sweeps at 06:00 must be the same fleet with the same gate, or the
-governance claim is only true for one of them.
+governance claim is only true for one of them. They now also share one **state
+bucket**, which is what makes the claim end to end: the sweep's hold at 06:00 is
+the row the desk approves at 09:00, and a hold a judge raises in chat at 14:00
+lands in the same queue with their name on it.
 
-> **Time and cost.** Budget 45–60 minutes for a first deploy, plus 15 for the
-> optional GCS mount in §4b. Cloud Run scales to zero, so the two services cost
-> approximately nothing while nobody is looking at them; a GCS bucket holding a
-> few hundred KB of ledger is rounding error. **Inference is the only line item
-> that grows** — and note §7a: an AI Studio API key does *not* draw on Google
-> Cloud credits, so if you were granted credits and want them to absorb the
-> model calls, you need Vertex. Either way the amounts are small at this scale:
-> a sweep is six cross-checks, and the whole eval is nine tasks. Check the
-> current per-token price rather than trusting a number in a document — but a
-> hackathon-sized credit grant is not the constraint here; forgetting to delete
-> a `--min-instances 1` service afterwards would be. The one exception is §4d's
-> Cloud SQL instance: roughly $8-10 for a judging window, and it bills while
+> **History, so an old command in your shell history does not confuse you.**
+> This used to be four Cloud Run services — a read-only console, a public
+> sandbox, a chat behind IAP, and a chat with a demo login. Each was defensible
+> on its own and together they were a maze; worse, they could not close the
+> loop, because a hold raised in chat landed in the chat container's disposable
+> ledger while the only desk that could approve anything was a different URL
+> over a different bucket. One service over one shared bucket closes it. **IAP,
+> `FREIGHT_CONSOLE_READONLY`, `FREIGHT_CONSOLE_MODE`, `FREIGHT_SANDBOX_URL`,
+> `FREIGHT_CHAT_DEMO_URL`, `FREIGHT_PUBLIC_URL` and `FREIGHT_IAP_AUDIENCE` are
+> all retired.** §10 has the teardown lines for anything you already deployed.
+
+> **The `=` in `--args=` is load-bearing.** Both deploys below override the entry
+> point with `--command sh --args='-c,…'`. The value starts with a dash, and
+> without the `=` gcloud's parser reads it as another flag and fails with
+> "expected one argument" — in every shell, not just PowerShell. The image's
+> default `CMD` is already the Service's command
+> (`uvicorn freight_fleet.webapp:app_factory --factory`); the Service passes it
+> explicitly anyway, so that what runs is visible in
+> `gcloud run services describe` rather than buried in a layer. The Job must
+> pass it, because it runs something else entirely.
+
+> **Time and cost.** Budget 45–60 minutes for a first deploy. Cloud Run scales to
+> zero, so the service costs approximately nothing while nobody is looking at
+> it; a GCS bucket holding a few hundred KB of ledger, a spool of demo mail and
+> a handful of uploads is rounding error. **Inference is the only line item that
+> grows** — and note §7a: an AI Studio API key does *not* draw on Google Cloud
+> credits, so if you were granted credits and want them to absorb the model
+> calls, you need Vertex. The shape deployed below is Vertex-only for exactly
+> that reason. Either way the amounts are small at this scale: a sweep is six
+> cross-checks, and the whole eval is nine tasks. Check the current per-token
+> price rather than trusting a number in a document — but a hackathon-sized
+> credit grant is not the constraint here; forgetting to delete a
+> `--min-instances 1` service afterwards would be. The one exception is §4.2's
+> Cloud SQL instance: roughly $8–10 for a judging window, and it bills while
 > idle, because a database does not scale to zero. §10 deletes it.
 
 ---
@@ -45,15 +56,16 @@ governance claim is only true for one of them.
 
 ### Yes, you need the repo on the machine you deploy from
 
-Three commands in this guide use `gcloud run deploy --source .` (§4, §4a, §5).
+Two commands in this guide use `gcloud run deploy --source .` (§4.3 and §5).
 That uploads **your current directory** to Cloud Build, which builds the image
 from the repo's `Dockerfile`. There is no "deploy from GitHub" shortcut here —
 if the working directory is not the repo, the build has nothing to build.
 
-The steps that need the repo present: **§4, §4a, §5** (the three `--source .`
-deploys), **§7a's local test**, and **§8 step 5**. Everything else — enabling
-APIs, Secret Manager, IAM, the scheduler, and every `curl` in §8 — is pure
-`gcloud`/HTTP and works from anywhere you are logged in.
+The steps that need the repo present: **§4.3 and §5** (the two `--source .`
+deploys), **§4.4's `chat-users` command**, **§7a's local test**, and **§8
+step 5**. Everything else — enabling APIs, Secret Manager, IAM, the scheduler,
+and every `curl` in §8 — is pure `gcloud`/HTTP and works from anywhere you are
+logged in.
 
 ### Option A — Cloud Shell (recommended; installs nothing)
 
@@ -71,8 +83,10 @@ python3 --version        # needs 3.11+; Cloud Shell is current
 Three things worth knowing before you rely on it:
 
 - **Web Preview** (the icon top-right) exposes ports 8080–8084 in the browser,
-  which is how you reach the authenticated ops console from §4a without a
-  tunnel on your own machine.
+  which is how you run the app *locally* in Cloud Shell —
+  `uvicorn freight_fleet.webapp:app_factory --factory --port 8080` — without
+  installing anything. The deployed service needs no tunnel at all: it is a
+  public URL with its own login in front of it.
 - `$HOME` persists (5 GB), but the VM is recycled after inactivity — a session
   idles out after ~20 minutes and is capped at ~12 hours. Your clone survives;
   a long-running process does not. Do not start a `--repeat 3` eval and walk
@@ -118,9 +132,9 @@ Set these once per shell, and re-set them if your Cloud Shell session recycles:
 ```bash
 export PROJECT_ID=neat-domain-494716-b3    # your project id
 export REGION=europe-west1                 # pick one near you; must support Cloud Run
-export SERVICE=freight-ops-fleet
-export JOB=freight-ops-sweep
-export OPS=freight-ops-console
+export SERVICE=freight-ops-fleet           # the one service
+export JOB=freight-ops-sweep               # the one job
+export BUCKET="${PROJECT_ID}-freight-state"   # the shared state, created in §4.1
 export REPO=freight-ops                    # Artifact Registry repo name
 
 gcloud config set project "$PROJECT_ID"
@@ -144,11 +158,13 @@ gcloud services enable \
   artifactregistry.googleapis.com \
   secretmanager.googleapis.com \
   cloudscheduler.googleapis.com \
+  sqladmin.googleapis.com \
   aiplatform.googleapis.com
 ```
 
-This takes a minute or two the first time. `aiplatform` is only needed if you
-switch to Vertex (§7); the rest are needed for every path below.
+This takes a minute or two the first time. `aiplatform` is what every model call
+in the deployed shape goes through (§7a), and `sqladmin` is the session database
+(§4.2). The rest are needed for every path below.
 
 ---
 
@@ -310,30 +326,42 @@ runs the same command as an explicit step for the same reason — §11.
 
 ### What the deployed demo does with it, and what it does not
 
-**`ingest` is a local operator step. Nothing runs it in a Cloud Run container.**
-That is a choice, and its reasons are the reasons it is a command rather than a
-tool:
+**The 26-document bulk `ingest` is a local operator step. Nothing runs it in a
+Cloud Run container.** That is a choice, and its reasons are the reasons it is a
+command rather than a tool:
 
-- A container that ingested on start would make a paid model call on every cold
-  start, for output nobody asked for.
-- The output would then have to persist somewhere, and the only durable place
-  the fleet has is the state bucket — which §5 already explains is the wrong
-  filesystem for many small writes.
+- A container that ingested on start would make 26 paid model calls on every
+  cold start, for output nobody asked for.
 - The transcription is *derived* from documents already in the image. Spending
   money to regenerate them on a demo URL buys a judge nothing they can see.
 
-So the deployed chat surface (§4d) demonstrates the two halves that need no paid
-ingest: ask it to read `raw/inbox/scan_001.pdf` and watch `read_file` refuse with
+**One document at a time is a different question, and the deployed service does
+do that.** `POST /upload` — the upload control on `/chat` — writes the file into
+the workspace jail under `raw/uploads/<who>/`, runs exactly the same
+transcription on that one file, and puts the result in `inbox/` with the same
+`<!-- transcribed ... -->` marker. It is bounded where a bulk run is not: PDF,
+PNG or JPEG only, 6 MB (the model's inline cap), ten uploads an hour per
+identity, and a durable copy under `FREIGHT_UPLOADS_DIR` on the state bucket
+that is restored into the workspace on container start, so a restart forgets
+nothing a judge handed it. A judge uploading their own scan is worth the cents;
+regenerating fixtures already in the image is not.
+
+The deployed chat also demonstrates the two halves that need no paid ingest at
+all: ask it to read `raw/inbox/scan_001.pdf` and watch `read_file` refuse with
 `binary` and the ingest hint, then ask the intake desk to sort `inbox/` — the
 five canonical scans plus both quotes — and watch it group them and name what is
-missing. The full 26-document ingest run belongs on camera, locally, where the
-`--dry-run` plan, the paid run, and the `<!-- transcribed ... -->` marker on the
-resulting file are all visible in one terminal and cost a few cents.
+missing. The full 26-document run still belongs on camera, locally, where the
+`--dry-run` plan, the paid run, and the marker on the resulting file are all
+visible in one terminal and cost a few cents.
 
 ---
 
 ## 2. Put the API key in Secret Manager
 
+> **Optional — the deployed shape does not use this.** §4 and §5 both run the
+> model through Vertex and mount no API key at all. Skip to §3 unless you
+> specifically want the AI Studio path.
+>
 > **If you have Cloud credits, read §7a first.** This section sets up an AI
 > Studio API key, which bills through the Gemini Developer API and **does not
 > draw on Google Cloud credits**. §7a routes the model through Vertex AI
@@ -370,194 +398,67 @@ gcloud iam service-accounts create freight-fleet \
   --display-name="Freight Ops Fleet runtime"
 
 export SA="freight-fleet@${PROJECT_ID}.iam.gserviceaccount.com"
+```
 
-# read ONLY the one secret it needs
+One identity runs both deployments, and it collects exactly six grants. Each is
+made in the section that needs it rather than all at once here, so that reading
+a section tells you what that section costs in privilege:
+
+| Role | Scope | What it buys | Granted in |
+|---|---|---|---|
+| `roles/aiplatform.user` | project | call the model | §7a |
+| `roles/storage.objectAdmin` | **the state bucket only** | the ledger, the approval store, the mail spool, the uploads | §4.1 |
+| `roles/cloudsql.client` | project | open the session database | §4.2 |
+| `roles/secretmanager.secretAccessor` | **each secret, one binding each** | the session URI, the user table, the invite code, the OAuth client secret, the SMTP password | §4.2, §4.4, §4.5 |
+| `roles/run.invoker` | **the sweep Job only** | the desk's "Run the sweep now" button, and Cloud Scheduler | §4.6, §6 |
+| `roles/run.viewer` | project | see whether a sweep is already running | §4.6 |
+
+Two of those are worth naming out loud. `secretAccessor` is bound **per secret**
+and never at the project — a service that can read every secret in a project is
+not least privilege, it is a shorter command. And `run.viewer` is a
+project-level *read* role because there is no per-job viewer; it is the smallest
+thing that can list a job's executions, which is what stops the desk button from
+starting a second sweep on top of a running one.
+
+Nothing on that list can create or delete infrastructure, and none of it is an
+owner or editor role. The service account can call a model, read five named
+secrets, write one bucket, open one database and start one job — and that is the
+complete list of things the deployed URL can cause to happen.
+
+If you are taking the AI Studio path in §2 rather than Vertex, add that secret
+too:
+
+```bash
 gcloud secrets add-iam-policy-binding gemini-api-key \
   --member="serviceAccount:${SA}" \
   --role="roles/secretmanager.secretAccessor"
 ```
 
-That is the whole grant for the API-key path. The fleet writes only inside its
-own container, so it needs no storage, no database, no Vertex roles. (§7 adds
-one role if you switch to Vertex.)
-
 ---
 
-## 4. Deploy the service
+## 4. Deploy the service — one door
 
-From the repo root:
+Everything a visitor can do lives on one URL behind one login: the homepage, the
+operator desk, the chat, document upload, and the button that starts the sweep.
+One process means one ledger, and one ledger is the point — a hold raised in
+chat is the same row the desk approves, and the sweep's 06:00 holds are waiting
+on the same screen.
 
-```bash
-gcloud run deploy "$SERVICE" \
-  --source . \
-  --service-account "$SA" \
-  --set-env-vars "FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_CONSOLE_READONLY=1,FREIGHT_SWEEP_SCHEDULE=weekdays 06:00 Europe/Athens" \
-  --memory 1Gi \
-  --cpu 1 \
-  --timeout 600 \
-  --max-instances 3 \
-  --allow-unauthenticated
-```
+Six things in order — the state bucket, the session database, the deploy itself,
+the login, the mail transport, the IAM behind the sweep button — and then a
+verification pass.
 
-What each flag is doing, and why:
-
-- **`--source .`** builds with Cloud Build using the repo's `Dockerfile`. No
-  local Docker needed. `.dockerignore` keeps `eval/` — the answer keys — out of
-  the build context entirely.
-- **No `--set-secrets` here, deliberately.** The read-only console renders four
-  artifacts the fleet already produced and calls no model, so it has no use for
-  the API key — and a credential a process cannot use is a credential that
-  cannot leak from it. The key is mounted only where work actually happens: the
-  sweep Job (§5) and the private ops console (§4a). Where the key *is* mounted,
-  `--set-secrets` puts it in the environment at runtime. It never
-  appears in config output. The console does not read it — keep it mounted only
-  if you intend to override the `CMD` back to `adk api_server`.
-- **`--timeout 600`** matters: a cross-check reads three documents and reasons
-  over them, which can take 60–90 seconds. Cloud Run's 300s default will cut off
-  a slow run mid-answer.
-- **`--memory 1Gi`** — ADK plus the Gemini SDK is comfortable here; 512Mi is
-  tight enough to OOM under concurrency.
-- **`--allow-unauthenticated`** makes the URL clickable for judges, and
-  **`FREIGHT_CONSOLE_READONLY=1` is what makes that safe.** Be precise about the
-  risk, because an earlier draft of this document got it wrong: the console
-  makes **no model calls at all** (`grep -c "LlmAgent\|Runner" src/freight_fleet/console.py`
-  → 0), so an open URL cannot burn Gemini quota. What it *could* do without the
-  read-only flag is worse. `POST /decision/{id}/approve` calls
-  `execute_approved`, which replays the held call and **writes the file**. On an
-  open URL, any stranger becomes the human in the loop, and the ledger records
-  their click as `approved` — the precise failure this project exists to
-  prevent. `FREIGHT_CONSOLE_READONLY=1` makes both decision routes return 403
-  before they reach the store, so the public surface is structurally incapable
-  of approving anything. See §4a for how you approve things yourself.
-
-First build takes 3–6 minutes. When it finishes you get a URL:
-
-```
-Service URL: https://freight-ops-fleet-XXXXXXXX-ew.a.run.app
-```
-
-### Verify it
-
-```bash
-export URL=$(gcloud run services describe "$SERVICE" --format='value(status.url)')
-
-# the console is up (no credentials involved)
-curl -s "$URL/reconcile.json"   # expect: {"diverged":false,...}
-curl -s "$URL/" | head -5       # the Desk
-```
-
-Do not probe `/healthz` on the public URL: Google's frontend reserves that path
-on `run.app` hosts and answers 404 itself — the request never reaches the
-container, so the app's own `/healthz` route cannot answer there. It still
-works where no Google frontend sits in front, e.g. through the §4a proxy.
-
-Open `$URL` in a browser: that is the demo surface. If you overrode the `CMD`
-back to `adk api_server`, check discoverability instead:
-
-```bash
-curl -s "$URL/list-apps"
-# expect: ["freight_ops"]
-```
-
-Then, if you are serving the ADK API, drive one real turn (the console has no
-such endpoint — it never calls a model):
-
-```bash
-curl -s -X POST "$URL/run" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "app_name": "freight_ops",
-    "user_id": "operator",
-    "session_id": "demo-1",
-    "new_message": {"role": "user", "parts": [{"text":
-      "Cross-check the documents in shipments/shp-002-hero"}]}
-  }' | python3 -m json.tool | tail -40
-```
-
-You should see the cross-check report with four discrepancies. **If you get a
-session error**, create the session first:
-
-```bash
-curl -s -X POST "$URL/apps/freight_ops/users/operator/sessions/demo-1" \
-  -H "Content-Type: application/json" -d '{}'
-```
-
-### The optional dev UI — see §4d before you put it on an open URL
-
-Adding `--with_ui` to an `adk deploy` (or changing the `CMD` to
-`adk api_server --with_ui`) serves ADK's web console, which is a much better
-demo surface than curl. ADK's own docs mark it **development-only**, and that
-label is doing more work than it looks like: the same app also serves the eval
-runner, the trace viewer and the agent builder, none of which authorises
-anything on its own. So it is a fine local habit and **not** a thing to leave on
-an unauthenticated URL. §4d deploys it properly — behind IAP, with the
-`user_id` pinned to the verified sign-in — and that is the version to use.
-
----
-
-## 4a. The private ops console — where the buttons actually work
-
-The public service can show the queue and refuse every decision. You still need
-somewhere the approve button *works*, and it must not be the same URL.
-
-Deploy the same image a second time, authenticated, with the read-only flag off
-(`$OPS` is set in §0):
-
-```bash
-gcloud run deploy "$OPS" \
-  --source . \
-  --service-account "$SA" \
-  --set-secrets "GOOGLE_API_KEY=gemini-api-key:latest" \
-  --set-env-vars "FREIGHT_MODEL=gemini-3.7-flash" \
-  --memory 1Gi --cpu 1 --timeout 600 --max-instances 1 \
-  --no-allow-unauthenticated
-```
-
-`--no-allow-unauthenticated` means Cloud Run rejects any request without a valid
-Google identity token. Grant yourself the invoker role and nobody else:
-
-```bash
-gcloud run services add-iam-policy-binding "$OPS" \
-  --region "$REGION" \
-  --member "user:$(gcloud config get-value account)" \
-  --role "roles/run.invoker"
-```
-
-Reach it by opening an authenticated tunnel — `gcloud` mints and refreshes the
-token for you, so the browser needs no plugin and you paste no credentials:
-
-```bash
-gcloud run services proxy "$OPS" --region "$REGION" --port 8081
-# now open http://localhost:8081 — buttons live, everything else identical
-```
-
-**In Cloud Shell**, run the same command and then use **Web Preview → Preview on
-port 8081** (the icon at the top right). Same tunnel, no local install; this is
-the reason §0 suggests Cloud Shell if you have not already got `gcloud` set up.
-
-**Why two services and not one with a password.** A shared password in an env
-var is a secret that leaks into shell history, screen shares and screenshots —
-on a demo call, especially. IAM is the access model Cloud Run already has, and
-splitting the deployment means the public surface is not "trusted not to write",
-it is **configured so it cannot**. That is the same argument the gate makes about
-tools, applied to the deployment: make the unsafe thing unreachable rather than
-asking a human to avoid it. It also demos well — you can show a judge the
-disabled buttons on the public URL and the live ones on localhost, from one
-image, and the difference is two flags.
-
----
-
-## 4b. Making the Job and the console share one ledger
+### 4.1 The state bucket — the one filesystem all the writers share
 
 **Read this before you demo.** Every Cloud Run container gets its own
 filesystem. The sweep Job writes its holds to `audit/ledger.jsonl` and
 `data/approvals.json` *inside the Job's container*, which is destroyed when the
-job exits. The console Service reads those paths *inside its own container* and
-sees nothing. Left alone, the deployed sweep and the deployed console never meet
-— the sweep reports "5 draft(s) held", the console says the desk is clear, and
-the demo has nothing to click.
+job exits. The Service reads those paths *inside its own container* and sees
+nothing. Left alone, the deployed sweep and the deployed desk never meet — the
+sweep reports "5 draft(s) held", the desk says the queue is clear, and the demo
+has nothing to click.
 
-Mount one GCS bucket into both so they share state:
+One GCS bucket, mounted into both:
 
 ```bash
 export BUCKET="${PROJECT_ID}-freight-state"
@@ -567,112 +468,38 @@ gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
   --member "serviceAccount:$SA" --role "roles/storage.objectAdmin"
 ```
 
-Then add the same three flags to the Job (§5) and to the ops console (§4a):
+**The Service mounts it read-write**, which is the change that made the
+four-service shape unnecessary. Four different things write there: the desk when
+a human approves (the approval store, then two ledger rows), the gate when chat
+holds something, `/state/sent` when an approved message is spooled, and
+`/state/uploads` when a judge uploads a document. A read-only mount would make
+all four either impossible or a lie.
 
-```bash
-  --add-volume "name=state,type=cloud-storage,bucket=$BUCKET" \
-  --add-volume-mount "volume=state,mount-path=/state" \
-  --set-env-vars "FREIGHT_LEDGER_PATH=/state/ledger.jsonl,FREIGHT_APPROVALS_PATH=/state/approvals.json"
-```
+Both governance paths are env-driven in the code — `console.py` and `cli.py`
+both read `FREIGHT_LEDGER_PATH` and `FREIGHT_APPROVALS_PATH` — so nothing needs
+changing to support this.
 
-(`--set-env-vars` replaces the whole set, so include `FREIGHT_MODEL` in the same
-flag rather than as a second one.) Both paths are already env-driven in the code
-— `cli.py:52` and `console.py:96` read `FREIGHT_LEDGER_PATH`, `cli.py:54` and
-`console.py:100` read `FREIGHT_APPROVALS_PATH` — so nothing needs changing to
-support this.
+**Two honest caveats, and one flag that follows from them.** GCS-FUSE is not a
+POSIX filesystem: appends and renames work but are not atomic across writers. So
+**`--max-instances 1` on the Service is load-bearing**, not a cost control — two
+containers appending small ledger rows through GCS-FUSE lose writes, and this
+repo has watched that happen once already (§5). And the store's
+re-read-before-mutate (`FileApprovalStore._reload`) is what keeps the desk and
+the sweep from clobbering each other's view; it was written for the local
+two-process case and applies here unchanged. The sweep still does its many small
+writes on local disk and publishes once at the end, for the same reason.
 
-Give the **public** console the same mount read-only, so judges see the real
-sweep's output rather than an empty desk:
+A third consequence worth knowing before you demo: GCS-FUSE caches metadata for
+about 60 seconds on the reader, so a file copied into the bucket from *outside*
+can take a minute to appear. Writes the container makes itself are visible to it
+immediately; this only bites after a `gcloud storage cp`.
 
-```bash
-  --add-volume "name=state,type=cloud-storage,bucket=$BUCKET,readonly=true" \
-  --add-volume-mount "volume=state,mount-path=/state" \
-```
+### 4.2 Sessions that survive the container — Cloud SQL for PostgreSQL
 
-Two honest caveats. GCS-FUSE is not a POSIX filesystem: appends and renames work
-but are not atomic across writers, so this is sound for one Job plus one console
-and is **not** a concurrency design. And the store's re-read-before-mutate
-(added in `FileApprovalStore._reload`) is what keeps the console and the sweep
-from clobbering each other's view here — it was written for the local
-two-process case and applies unchanged.
-
----
-
-## 4c. A public sandbox for visitors
-
-The read-only URL shows judges everything and lets them decide nothing — and
-its 403 is the argument. But a visitor who wants to *feel* the approve button
-work should be able to, without a password (§4a says why not) and without
-touching the governed record. Deploy the same image a third time on a
-**disposable copy** of the state:
-
-```bash
-export SANDBOX="freight-ops-sandbox"
-export SANDBOX_BUCKET="${PROJECT_ID}-freight-sandbox"
-gcloud storage buckets create "gs://$SANDBOX_BUCKET" --location "$REGION" --uniform-bucket-level-access
-gcloud storage buckets add-iam-policy-binding "gs://$SANDBOX_BUCKET" \
-  --member "serviceAccount:$SA" --role "roles/storage.objectAdmin"
-
-# seed it from a good sweep, and re-run this line whenever you want it reset
-gcloud storage cp "gs://$BUCKET/ledger.jsonl" "gs://$BUCKET/approvals.json" "gs://$SANDBOX_BUCKET/"
-
-IMAGE=$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(spec.template.spec.containers[0].image)')
-gcloud run deploy "$SANDBOX" \
-  --image "$IMAGE" \
-  --service-account "$SA" \
-  --add-volume "name=state,type=cloud-storage,bucket=$SANDBOX_BUCKET" \
-  --add-volume-mount "volume=state,mount-path=/state" \
-  --set-env-vars "FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_CONSOLE_MODE=sandbox,FREIGHT_LEDGER_PATH=/state/ledger.jsonl,FREIGHT_APPROVALS_PATH=/state/approvals.json" \
-  --memory 1Gi --cpu 1 --timeout 300 --max-instances 1 \
-  --allow-unauthenticated
-
-# tell the read-only console where it is, so its refusals point somewhere
-gcloud run services update "$SERVICE" --region "$REGION" \
-  --update-env-vars "FREIGHT_SANDBOX_URL=$(gcloud run services describe "$SANDBOX" --region "$REGION" --format='value(status.url)')"
-```
-
-What the two env vars do, and what they do not. `FREIGHT_CONSOLE_MODE=sandbox`
-paints a ribbon on every page saying the record is disposable; it changes
-nothing about the gate — the sandbox is simply a deployment whose store is not
-the governed one. `FREIGHT_SANDBOX_URL` on the read-only console adds one link
-to its first-visit brief, its disabled buttons and its 403 page. No approve in
-the sandbox calls a model (it replays a file write inside that container), so
-an open sandbox exposes serving cost only, capped by `--max-instances 1`. Reuse
-the **same image digest** the public console runs — one image, three surfaces,
-and the difference between them is env vars you can read back.
-
----
-
-## 4d. The chat surface — ADK's dev UI behind Google sign-in
-
-§4 shows a judge what the fleet already did. §4c lets them click approve on a
-disposable copy. Neither lets them **ask the fleet a question**, and that is the
-one thing a judge most wants to do. This section deploys ADK's dev UI as a
-fourth service, behind Google sign-in, with per-user conversations that survive
-the container.
-
-```bash
-export CHAT=freight-ops-chat
-export PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
-```
-
-**Why a fourth deployment of the same image, and not a route on the console.**
-`adk web` does not serve only a chat box. The same FastAPI app carries the eval
-runner, the trace viewer, the agent builder and the artifact endpoints, and none
-of them has any authorisation of its own. On an open URL, a passer-by could run
-the eval against a paid model, read another visitor's conversation, or edit the
-agent. So it goes behind IAP and nothing else changes: `console.py` stays
-JavaScript-free and imports neither `google.adk` nor `google.genai` (there is a
-test that asserts exactly that — `tests/test_seals.py`), which is what keeps the
-public URL incapable of spending money. Two surfaces, two threat models, one
-image.
-
-### Sessions: Cloud SQL for PostgreSQL
-
-The chat surface is the first deployment where durable sessions are a
-*judgeable* capability rather than an operational nicety — a judge signs in,
-asks about `shp-002-hero`, closes the tab, comes back and the fleet still knows
-what it found. That needs a session store outside the container.
+A judge signs in, asks about `shp-002-hero`, closes the tab, comes back and the
+fleet still knows what it found. That needs a session store outside the
+container, and on the chat it is a *judgeable* capability rather than an
+operational nicety — a judge can see whether it remembers.
 
 ```bash
 gcloud services enable sqladmin.googleapis.com
@@ -702,18 +529,17 @@ gcloud secrets add-iam-policy-binding freight-sessions-uri \
 
 Four things about that URI are load-bearing:
 
-- **`postgresql+asyncpg://`** — `asyncpg` is the one new runtime dependency this
-  section adds. ADK's `DatabaseSessionService` opens the URI through SQLAlchemy's
-  *async* engine, so a sync driver is not a slower option, it is a startup
-  error. It is a runtime dependency rather than an extra because a missing
-  driver would otherwise surface at the first session write on Cloud Run, after
-  the deploy looked successful.
+- **`postgresql+asyncpg://`** — `asyncpg` is a runtime dependency of this repo,
+  not an extra. ADK's `DatabaseSessionService` opens the URI through
+  SQLAlchemy's *async* engine, so a sync driver is not a slower option, it is a
+  startup error — and a missing driver would otherwise surface at the first
+  session write on Cloud Run, after the deploy looked successful.
 - **`@/sessions?host=/cloudsql/PROJECT:REGION:INSTANCE`** — empty host, database
   name, and the unix socket as a query parameter. That is the form Cloud Run's
-  built-in Cloud SQL connector exposes, and it is why no VPC connector, no
-  proxy sidecar and no IP allowlist appear anywhere in this section.
-- **It must match the form `cli.py` uses.** `chat`, `sweep` and this UI all read
-  `FREIGHT_SESSIONS_DB` and all open it through the same
+  built-in Cloud SQL connector exposes, and it is why no VPC connector, no proxy
+  sidecar and no IP allowlist appear anywhere in this guide.
+- **It must match the form `cli.py` uses.** `chat`, `sweep` and the deployed app
+  all read `FREIGHT_SESSIONS_DB` and all open it through the same
   `DatabaseSessionService`, so one URI gives you one durable store shared by
   three entry points and no new code. The local default stays
   `sqlite+aiosqlite:///./data/sessions.db`. **Never a bare `sqlite://`** — ADK
@@ -725,326 +551,393 @@ Four things about that URI are load-bearing:
   the judge's two visits. The secret is not an optimisation; it is the feature.
 
 **Cost.** `db-f1-micro` is roughly **$8–10 for a judging window**, and it is the
-only line item here that bills while nobody is looking — Cloud Run scales to
-zero, Cloud SQL does not. Delete it when the window closes (§10):
+only line item in this guide that bills while nobody is looking — Cloud Run
+scales to zero, Cloud SQL does not. §10 deletes it.
+
+### 4.3 The deploy
+
+From the repo root. Every flag is explained under it:
 
 ```bash
-gcloud sql instances delete freight-sessions
-```
-
-### Deploy it
-
-```bash
-IMAGE=$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(spec.template.spec.containers[0].image)')
-
-gcloud run deploy "$CHAT" \
-  --image "$IMAGE" \
+gcloud run deploy "$SERVICE" --region "$REGION" --source . \
   --service-account "$SA" \
   --command sh \
-  --args="-c,uvicorn freight_fleet.devui:app_factory --factory --host 0.0.0.0 --port \${PORT:-8080}" \
+  --args='-c,uvicorn freight_fleet.webapp:app_factory --factory --host 0.0.0.0 --port ${PORT:-8080}' \
+  --add-volume "name=state,type=cloud-storage,bucket=$BUCKET" \
+  --add-volume-mount "volume=state,mount-path=/state" \
   --add-cloudsql-instances "$PROJECT_ID:$REGION:freight-sessions" \
-  --set-secrets FREIGHT_SESSIONS_DB=freight-sessions-uri:latest \
-  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_AGENTS_DIR=/app/agents,FREIGHT_IAP_AUDIENCE=/projects/$PROJECT_NUMBER/locations/$REGION/services/$CHAT" \
-  --memory 1Gi \
-  --cpu 1 \
-  --timeout 600 \
-  --max-instances 1 \
-  --min-instances 0 \
-  --concurrency 4 \
-  --no-allow-unauthenticated
+  --set-secrets "FREIGHT_SESSIONS_DB=freight-sessions-uri:latest,FREIGHT_CHAT_USERS=freight-chat-users:latest,FREIGHT_CHAT_ACCESS_CODE=freight-chat-access-code:latest" \
+  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_AGENTS_DIR=/app/agents,FREIGHT_LEDGER_PATH=/state/ledger.jsonl,FREIGHT_APPROVALS_PATH=/state/approvals.json,FREIGHT_MAIL_SPOOL=/state/sent,FREIGHT_UPLOADS_DIR=/state/uploads,FREIGHT_MAIL_SINK=freightops.demo@gmail.com,FREIGHT_CHAT_URL=/chat,FREIGHT_GATED=1,FREIGHT_SWEEP_JOB=projects/$PROJECT_ID/locations/$REGION/jobs/$JOB,FREIGHT_SWEEP_SCHEDULE=weekdays 06:00 Europe/Athens,FREIGHT_CONTACT_EMAIL=freightops.demo@gmail.com,FREIGHT_REPO_URL=https://github.com/MDadopoulos/freightopsfleet,FREIGHT_GOOGLE_REDIRECT_URI=https://SERVICE-URL/auth/google/callback" \
+  --memory 1Gi --cpu 1 --timeout 600 --max-instances 1 --min-instances 0 --concurrency 8 \
+  --allow-unauthenticated
 ```
 
-- **`--command sh --args="-c,uvicorn ... --factory"`** overrides the image's
-  console `CMD` with the dev UI. The `=` is the same parser quirk §5 documents:
-  the value starts with a dash, and without `=` gcloud reads it as another flag.
-  `--factory` is required too — building ADK's app scans the agent directory and
-  opens the session database, so that must happen when uvicorn starts the worker,
-  not when the module is imported.
-- **`--add-cloudsql-instances`** is what mounts `/cloudsql/...` into the
-  container. Without it the URI's socket path does not exist and the first
-  session write fails with a connection error that names a file, not a database.
-- **`--set-secrets`** keeps the password out of `gcloud run services describe`
-  output and out of your deployment history. `--set-env-vars` would put it in
-  both, permanently.
-- **`FREIGHT_IAP_AUDIENCE`** is the exact string
-  `/projects/PROJECT_NUMBER/locations/REGION/services/SERVICE`, with the
-  **numeric** project number. Getting it wrong is the one mistake that fails
-  *open* in naive implementations — an unverified audience accepts a valid IAP
-  token minted for somebody else's service. `devui.py` requires it explicitly
-  rather than deriving it, so a wrong value fails closed and loudly. Unset means
-  local development, where the middleware passes requests through untouched;
-  never leave it unset in a deployment.
-- **`--no-allow-unauthenticated`** — IAP invokes the service as its own service
-  agent, so the service itself must not be public. The two are layered, not
-  alternatives.
-- **`--max-instances 1 --concurrency 4 --timeout 600`** — see *Spend* below.
+**Two chicken-and-egg problems, both harmless.** The two login secrets in
+`--set-secrets` are created in §4.4, and `FREIGHT_GOOGLE_REDIRECT_URI` needs the
+service URL that this command is about to print. On a first pass, either create
+the secrets first, or drop them from the flag and add them afterwards with
+`--update-secrets`; then come back and set the real redirect URI with
+`--update-env-vars` once you know the URL. §4.4 has both commands.
 
-### Put IAP in front of it
+What the flags are doing:
+
+- **`--source .`** builds with Cloud Build using the repo's `Dockerfile`. No
+  local Docker needed. `.dockerignore` keeps `eval/` — the answer keys — out of
+  the build context entirely.
+- **`--command sh --args='-c,uvicorn …'`** is the image's own default, stated
+  explicitly so a `describe` shows what runs. See the note at the top of this
+  document about the `=`.
+- **`--add-volume` / `--add-volume-mount`** mount §4.1's bucket at `/state`,
+  read-write.
+- **`--add-cloudsql-instances`** is what mounts `/cloudsql/…` into the
+  container. Without it the session URI's socket path does not exist and the
+  first session write fails with a connection error that names a file, not a
+  database.
+- **`--set-secrets`** keeps the database password, the password hashes and the
+  invite code out of `gcloud run services describe` output and out of your
+  deployment history. `--set-env-vars` would put them in both, permanently.
+- **No `GOOGLE_API_KEY`.** The model runs on Vertex through the attached service
+  account (§7a): the container gets tokens from the metadata server, and there
+  is no key to mount, leak or rotate.
+- **`--timeout 600`** matters: a cross-check reads three documents and reasons
+  over them, which can take 60–90 seconds. Cloud Run's 300s default would cut
+  off a slow answer mid-stream.
+- **`--memory 1Gi`** — ADK plus the Gemini SDK is comfortable here; 512Mi is
+  tight enough to OOM under concurrency.
+- **`--max-instances 1`** is the correctness flag, not the cost flag (§4.1), and
+  it doubles as the spend cap: one container's worth of Gemini calls, however
+  many people are signed in. **`--concurrency 8`** keeps that one container from
+  queueing a crowd behind a 60-second cross-check. `access.py` also counts login
+  failures per address *in this process*, which is the whole service precisely
+  because there is only one instance.
+- **`--allow-unauthenticated`** makes the URL clickable, and **the login is what
+  makes that safe**. Cloud Run IAM cannot express "any judge with the code"; the
+  app's own door can, and it is the same door for the desk, the chat and the
+  uploads. `/`, `/privacy`, `/reconcile.json`, `/robots.txt` and `/healthz` are
+  the only paths reachable without it.
+
+The environment variables, since there are a lot of them:
+
+| Variable | What it does |
+|---|---|
+| `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` | route every model call through Vertex on the attached service account — §7a |
+| `FREIGHT_MODEL` | the model id every agent uses |
+| `FREIGHT_AGENTS_DIR` | `/app/agents` — the folder *containing* `freight_ops/`, which ADK scans |
+| `FREIGHT_LEDGER_PATH`, `FREIGHT_APPROVALS_PATH` | the governed record, on the bucket |
+| `FREIGHT_MAIL_SPOOL` | where every delivered message is written; the **Sent** page reads it |
+| `FREIGHT_UPLOADS_DIR` | the durable copy of uploads, restored into the workspace on start |
+| `FREIGHT_MAIL_SINK` | where approved mail is actually delivered — §4.5 |
+| `FREIGHT_CHAT_URL` | makes the desk link to "Ask the fleet"; `/chat` on this same host |
+| `FREIGHT_GATED` | tells the console a login sits in front of it, so the nav offers **Sign out**. Display only — the console never checks a cookie itself |
+| `FREIGHT_SWEEP_JOB` | the Job's full resource name; setting it is what renders the **Run the sweep now** button — §4.6 |
+| `FREIGHT_SWEEP_SCHEDULE` | the cadence, verbatim, for display. The app cannot check it; §6 is where it is actually set |
+| `FREIGHT_CONTACT_EMAIL` | the address on `/privacy` |
+| `FREIGHT_REPO_URL` | the "Source" link on the homepage |
+| `FREIGHT_GOOGLE_REDIRECT_URI` | the OAuth callback — §4.4 |
+
+Two more the deployment may set later: `FREIGHT_PRICE_IN_PER_M` and
+`FREIGHT_PRICE_OUT_PER_M`, USD per million tokens. With both set, the chat page
+turns its token counter into a dollar estimate at *your* rates; with either
+unset it shows tokens only and says so. The page never invents a price, which is
+why this is an env var and not a constant — a hardcoded price would be wrong the
+week after it was written.
+
+### 4.4 The login — who is allowed to spend the fleet's money
+
+`access.py` is the whole access model, and it is what replaced IAP. Everything
+behind `/` needs a name attached to it, because everything behind `/` can
+approve a send, ask the fleet to spend money, or upload a document. There are
+two ways to get a name, and a deployment switches each on by which variables it
+sets:
+
+| Set | What `/access` shows |
+|---|---|
+| `FREIGHT_CHAT_USERS` | the **demo login** panel — username and password |
+| `FREIGHT_GOOGLE_CLIENT_ID` + `FREIGHT_GOOGLE_CLIENT_SECRET` + `FREIGHT_GOOGLE_REDIRECT_URI` | the **Google sign-in** panel |
+| `FREIGHT_CHAT_ACCESS_CODE` *with* Google | an invite-code field **inside** the Google panel, checked before the redirect |
+| `FREIGHT_CHAT_ACCESS_CODE` *alone* | a bare code form. This is the old IAP-era mode, where something in front already knew who you were; it pins no identity and is **not** the deployed shape |
+| nothing at all | local development: the gate passes everything through and the desk is at `/desk` |
+
+The deployed shape sets all three groups: two panels side by side, with the code
+in front of the Google one.
+
+#### Mint the demo users
 
 ```bash
-gcloud services enable iap.googleapis.com
+# prints the JSON for the secret AND the passwords, once — there is no second chance
+python -m freight_fleet.cli chat-users judge1 judge2 judge3 > chat-users.txt
 
-# The IAP service agent must exist before it can be granted anything.
-gcloud beta services identity create --service=iap.googleapis.com --project="$PROJECT_ID"
-
-gcloud run services add-iam-policy-binding "$CHAT" --region="$REGION" \
-  --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com" \
-  --role="roles/run.invoker"
+# the JSON half becomes the secret; the passwords half goes in the submission form
+sed -n '/^{/,/^}/p' chat-users.txt \
+  | gcloud secrets create freight-chat-users --replication-policy=automatic --data-file=-
+gcloud secrets add-iam-policy-binding freight-chat-users \
+  --member "serviceAccount:$SA" --role roles/secretmanager.secretAccessor
 ```
 
-**The one-time custom OAuth client — do not skip this on an org-less project.**
-IAP's Google-managed OAuth client admits only identities *inside your
-organization*. This project has no organization, so with the managed client
-nobody can sign in at all: every judge gets a refusal and no amount of IAM
-fixes it. You need your own OAuth client, once per project:
+Some judges will not want their Google account in a stranger's database, and
+that is a reasonable position — this is the courtesy exit for them. The secret
+holds scrypt hashes and nothing else; the passwords exist only in
+`chat-users.txt`, which you delete once the submission form has them. Rotate by
+minting again: the cookie's signing key is *derived* from the user table, so a
+new table kills every outstanding cookie with no second secret to manage.
 
-1. **Console path (the one to use).** APIs & Services → **OAuth consent screen /
-   Branding**: set the audience to **External** and the publishing status to
-   **In production** (in *Testing* only listed test users can sign in, which is
-   the same wall by a different name). Then Credentials → **Create OAuth client
-   ID** → *Web application*, and add the authorised redirect URI
-   `https://iap.googleapis.com/v1/oauth/clientIds/CLIENT_ID:handleRedirect` —
-   substituting the client id the dialog just gave you into its own redirect
-   URI, which reads like a typo and is not.
-2. **gcloud path.** `gcloud iap settings set iap-oauth.yaml --resource-type=cloud-run --service="$CHAT" --region="$REGION"`
-   applies a YAML settings file. **Read the current settings back first** —
-   `gcloud iap settings get --resource-type=cloud-run --service="$CHAT" --region="$REGION"` —
-   and edit what it prints, rather than writing the file from memory: IAP's
-   settings schema differs between resource types and a wrong key is accepted
-   silently as "no change". **Do not commit `iap-oauth.yaml`**; it holds the
-   client secret. `rm` it when the command succeeds.
+The username **is** the identity here. It is pinned into every ADK `user_id` and
+stamped on every ledger row that visitor decides, so `judge1` and `judge2` never
+see each other's conversations and the record says which of them approved what.
 
-Then turn IAP on and let anyone with a Google account in:
+#### Create the OAuth client — this is what replaced IAP
+
+IAP is gone. It was a per-service switch that could not share a page with a
+password form, its Google-managed OAuth client admits only identities *inside an
+organization* (and this project has no organization, so nobody could sign in at
+all), and it broke `gcloud run services proxy`. Our own OAuth client does the
+same job on one page, and the page can offer both ways in.
+
+1. Google Cloud console → **APIs & Services → Credentials → Create credentials →
+   OAuth client ID → Web application**.
+2. Authorised redirect URI: `https://<service-url>/auth/google/callback` —
+   exactly, including the scheme, with no trailing slash. Google matches this
+   string literally.
+3. The consent screen already exists on this project: audience **External**,
+   publishing status **In production**, support email
+   `freightops.demo@gmail.com`, homepage `/` and privacy policy `/privacy`. Both
+   of those pages are served by this app and reachable **without a login**, which
+   is what makes the published state honest rather than a form filled in with a
+   URL nobody can open.
+
+Then store the secret half and hand the service all three values:
 
 ```bash
-gcloud run services update "$CHAT" --region="$REGION" --iap
+printf '%s' 'THE-CLIENT-SECRET' \
+  | gcloud secrets create freight-google-client-secret --replication-policy=automatic --data-file=-
+gcloud secrets add-iam-policy-binding freight-google-client-secret \
+  --member "serviceAccount:$SA" --role roles/secretmanager.secretAccessor
 
-gcloud iap web add-iam-policy-binding \
-  --resource-type=cloud-run --service="$CHAT" --region="$REGION" \
-  --member=allAuthenticatedUsers \
-  --role=roles/iap.httpsResourceAccessor
+export URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')
+
+gcloud run services update "$SERVICE" --region "$REGION" \
+  --update-secrets FREIGHT_GOOGLE_CLIENT_SECRET=freight-google-client-secret:latest \
+  --update-env-vars "FREIGHT_GOOGLE_CLIENT_ID=THE-CLIENT-ID.apps.googleusercontent.com,FREIGHT_GOOGLE_REDIRECT_URI=$URL/auth/google/callback"
 ```
 
-`allAuthenticatedUsers` means *any signed-in Google account* — not anonymous
-traffic, but not a list you curated either. Two honest costs: IAP's audit logs
-stop identifying **who was authorised** (everyone is), and the binding carries
-no expiry condition, so nothing removes it for you. Remove it when judging ends:
+The client **secret** goes through Secret Manager and the client **id** does
+not: an OAuth client id is public by construction — it travels in the URL of
+every sign-in — and hiding it would only make it harder to read back what is
+deployed.
 
-```bash
-gcloud iap web remove-iam-policy-binding \
-  --resource-type=cloud-run --service="$CHAT" --region="$REGION" \
-  --member=allAuthenticatedUsers \
-  --role=roles/iap.httpsResourceAccessor
-```
+**Use the `--update-` forms for every change after the first deploy.**
+`--set-secrets` and `--set-env-vars` replace the entire set; `--update-secrets`
+and `--update-env-vars` merge. The Service carries three secrets and sixteen
+environment variables, and retyping all of them correctly to change one is how
+this deployment gets broken.
 
-**If the custom OAuth client is more than you want to do**, the ladder down, in
-order:
+What the callback does when it comes back: the code is exchanged for an ID
+token over TLS, and the token is checked for issuer, audience (it must have been
+minted for *this* client — somebody else's client is still a valid Google
+signature) and expiry. The verified, `email_verified` address is the identity.
 
-1. **Bind the judges' addresses individually**: `--member="user:judge@example.com"`,
-   repeated. Strictly better than `allAuthenticatedUsers` — real audit logs,
-   real per-person access — and it needs the same custom OAuth client, so it
-   saves you nothing except the open door. Use it if you know the addresses.
-2. **Last resort: a throwaway Google account** whose password goes only in the
-   submission form. It works, and it is worse in a way worth naming: every judge
-   then shares one `user_id`, so "per-user durable sessions" degrades to one
-   shared conversation, they see each other's history, and the IAP audit log
-   records one identity for everybody. If you end up here, say so in the
-   submission rather than letting a judge discover it.
-
-### Per-user isolation, in three sentences
-
-The middleware verifies the `x-goog-iap-jwt-assertion` header against IAP's key
-set and the audience above, and refuses the request if it is missing or invalid
-(HTTP `403` JSON; a websocket gets `close` code `4403` after the handshake).
-It then **overwrites** the `user_id` in all three places ADK reads one — the
-`/users/<id>/` path segment, the JSON body of `/run` and `/run_sse`, and the
-`/run_live` query string — with the verified `email` claim. So the dev UI's
-"Edit user ID" control is cosmetic: a visitor can type anything into it, and the
-server pins the session to the account they signed in with regardless. It
-rewrites unconditionally rather than checking that the claimed id matches,
-because a check has a branch that can be wrong and an overwrite does not.
-
-One naming note. The dev UI's app name is the agent directory, `freight_ops`,
-while `cli.py` and the sweep use `freight_fleet`. Same database, separate
-conversation namespaces — which is what you want: a judge's chat should not
-appear in the operator's history.
-
-### Governance state on this service is sandbox-class
-
-`FREIGHT_LEDGER_PATH` and `FREIGHT_APPROVALS_PATH` stay at the image defaults,
-on the container's own disk. No state bucket is mounted, deliberately: mounting
-§4b's bucket read-write would put a ledger append behind every tool call through
-GCS-FUSE, which is the concurrent-small-write failure this repo has already hit
-once (§5).
-
-So: **a hold raised in chat lands in that container's disposable ledger**
-(`session_id="cloudrun"`), is reported in the reply the judge is reading, and
-disappears with the instance. It is **not** the governed record the ops console
-approves. That is a demonstration of the gate, not an entry in the audit trail —
-and a judge who wants to click **approve** on a real held action should be
-pointed at the §4c sandbox console, where the buttons work against a durable
-(if disposable) store. Say which one they are looking at; the distinction is the
-whole point of the project and it survives being explained out loud.
-
-### Spend and abuse controls
-
-This is the only surface where a stranger's click costs money, so:
-
-- **IAP** stops anonymous traffic entirely — no sign-in, no request reaches the
-  container.
-- **`--max-instances 1`** caps the worst case to one container's worth of Gemini
-  calls, however many people are signed in. **`--concurrency 4`** keeps that one
-  container from queueing a crowd behind a 60-second cross-check.
-  **`--timeout 600`** is the same reasoning as §4: a three-document cross-check
-  takes 60–90 seconds and Cloud Run's 300s default would cut it off mid-answer.
-- **A budget alert**, so a surprise is a surprise you hear about:
-
-```bash
-gcloud billing budgets create \
-  --billing-account="$(gcloud billing projects describe "$PROJECT_ID" --format='value(billingAccountName)' | sed 's#.*/##')" \
-  --display-name=freight-ops \
-  --budget-amount=50 \
-  --threshold-rule=percent=0.5 \
-  --threshold-rule=percent=0.9 \
-  --threshold-rule=percent=1.0
-```
-
-  **Budget alerts do not stop spend.** They send email at 50%, 90% and 100% of
-  $50 and nothing else happens. The thing that actually caps this deployment is
-  `--max-instances 1`; the budget is how you find out you were wrong about that.
-
-### Reaching it
-
-Open the service URL in a browser and sign in:
-
-```bash
-gcloud run services describe "$CHAT" --region "$REGION" --format='value(status.url)'
-```
-
-**`gcloud run services proxy` no longer works once IAP is on.** The proxy
-authenticates you to *Cloud Run*, and IAP now sits in front of Cloud Run
-expecting a browser sign-in flow it cannot get from a CLI tunnel. Browser
-sign-in is the path; that is the point of this section, and it is worth knowing
-before you try the §4a habit and read the refusal as a broken deployment.
-
-Allow **several minutes** after `--iap` and after the IAM binding before the
-first successful sign-in. IAP configuration propagates; a 403 in the first two
-minutes is not yet evidence of anything.
-
----
-
-### The invite code — who was invited, not only who they are
-
-Once the consent screen is published, `allAuthenticatedUsers` means *any* Google
-account, and every signed-in visitor can make the fleet spend money. IAP cannot
-express "invited"; `freight_fleet.access` can. It sits inside the IAP layer and
-asks, once per browser, for a code the operator hands out in the submission form:
+#### The invite code
 
 ```bash
 export CODE="FLEET-$(openssl rand -hex 3 | tr a-f A-F)-$(openssl rand -hex 3 | tr a-f A-F)"
-printf '%s' "$CODE" | gcloud secrets create freight-chat-access-code --replication-policy=automatic --data-file=-
-gcloud secrets add-iam-policy-binding freight-chat-access-code   --member "serviceAccount:$SA" --role roles/secretmanager.secretAccessor
-gcloud run services update "$CHAT" --region "$REGION"   --update-secrets FREIGHT_CHAT_ACCESS_CODE=freight-chat-access-code:latest
+printf '%s' "$CODE" \
+  | gcloud secrets create freight-chat-access-code --replication-policy=automatic --data-file=-
+gcloud secrets add-iam-policy-binding freight-chat-access-code \
+  --member "serviceAccount:$SA" --role roles/secretmanager.secretAccessor
 echo "$CODE"   # goes in the submission form and nowhere else
 ```
 
-What it does: a signed-in visitor without the cookie is sent to `/access`, a
-plain HTML form; API calls and the websocket are refused outright (403 / 4403).
-The right code sets a `HttpOnly; Secure; SameSite=Lax` cookie for seven days,
-signed with a key derived from the code itself — so **rotating the code
-(`gcloud secrets versions add` + the `update-secrets` line again) invalidates
-every cookie** with no second secret to manage. Five wrong guesses from one
-address lock it out for fifteen minutes. Whitespace and case are ignored: judges
-type these by hand.
+Any Google account can sign in with Google; only an invited one should get to
+put the fleet to work. The code is asked for **before** the redirect, so a
+stranger cannot even make Google render a consent screen for this app. Five
+wrong guesses from one address lock it out for fifteen minutes. Whitespace and
+case are ignored — judges type these by hand.
 
-What it does not do: it is not an identity. The IAP layer still pins every
-`user_id` to the signed-in email, so two judges sharing one code still get their
-own sessions and their own history. Unset, the gate passes everything through —
-the same convention `FREIGHT_IAP_AUDIENCE` follows for local development.
+What it is not: an identity. The verified email is the identity, so two judges
+sharing one code still get their own sessions, their own history and their own
+name on the rows they approve.
 
----
+Rotating any of the three — the user table, the code, the client id — changes
+the derived cookie key and invalidates every outstanding cookie. One rotation
+mechanism for the whole door, and no second secret to keep in step.
 
-### The demo login — for visitors who would rather not sign in
+### 4.5 Mail — where an approved send actually goes
 
-Some judges will not want their Google account in a stranger's database, and
-that is a reasonable position. So the same gate has a second mode and the same
-image runs a second time, **without IAP**, where the username is the identity:
+`send_email` is the one tool whose mistake cannot be undone, so the model never
+chooses where mail goes. The drafted `to` — a carrier, a shipper's agent — is
+recorded as the **intended** recipient and is *never used as a delivery
+address*. Delivery is to `FREIGHT_MAIL_SINK`, plus a copy to the approving human
+when they signed in with Google and therefore have an address. A chat box that
+could email an arbitrary address after one click would be a spam relay with a
+nice UI.
+
+Two transports, chosen with `FREIGHT_MAIL_TRANSPORT`:
+
+- **`spool`** (the default, and what §4.3 deploys). Nothing leaves the project.
+  Every approved message is written as one JSON file under `FREIGHT_MAIL_SPOOL`
+  — `/state/sent` on the bucket — and the console's **Sent** page is the mailbox.
+  Honest and free; it is what a deployment runs until somebody hands it SMTP
+  credentials.
+- **`smtp`** — real delivery, *then* the spool. Every transport spools, because
+  the spool is the evidence: the ledger row says *that* a send ran, the spool
+  says *what* left, to whom, approved by whom.
+
+Real mail through Gmail, if you want an approval to land in an inbox on camera:
 
 ```bash
-# mint the credentials: prints the JSON for the secret AND the passwords, once
-python -m freight_fleet.cli chat-users judge1 judge2 judge3 > chat-users.txt
-# store the JSON half as the secret; keep the passwords half for the submission form
-sed -n '/^{/,/^}/p' chat-users.txt | gcloud secrets create freight-chat-users --replication-policy=automatic --data-file=-
-gcloud secrets add-iam-policy-binding freight-chat-users --member "serviceAccount:$SA" --role roles/secretmanager.secretAccessor
+# On the sending Google account, 2-Step Verification must be ON; then create an
+# App Password (Google Account → Security → App passwords). The account's normal
+# password will not authenticate here.
+printf '%s' 'THE-16-CHAR-APP-PASSWORD' \
+  | gcloud secrets create freight-smtp-password --replication-policy=automatic --data-file=-
+gcloud secrets add-iam-policy-binding freight-smtp-password \
+  --member "serviceAccount:$SA" --role roles/secretmanager.secretAccessor
 
-export CHAT_DEMO=freight-ops-chat-demo
-gcloud run deploy "$CHAT_DEMO" --region "$REGION" --image "$IMAGE" --service-account "$SA"   --command sh --args="-c,uvicorn freight_fleet.devui:app_factory --factory --host 0.0.0.0 --port \${PORT:-8080}"   --add-cloudsql-instances "$PROJECT_ID:$REGION:freight-sessions"   --set-secrets FREIGHT_SESSIONS_DB=freight-sessions-uri:latest,FREIGHT_CHAT_USERS=freight-chat-users:latest   --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_AGENTS_DIR=/app/agents"   --memory 1Gi --cpu 1 --timeout 600 --max-instances 1 --min-instances 0 --concurrency 4   --allow-unauthenticated
-gcloud run services update "$SERVICE" --region "$REGION"   --update-env-vars "FREIGHT_CHAT_DEMO_URL=$(gcloud run services describe "$CHAT_DEMO" --region "$REGION" --format='value(status.url)')"
+gcloud run services update "$SERVICE" --region "$REGION" \
+  --update-secrets FREIGHT_SMTP_PASSWORD=freight-smtp-password:latest \
+  --update-env-vars "FREIGHT_MAIL_TRANSPORT=smtp,FREIGHT_SMTP_USER=freightops.demo@gmail.com"
 ```
 
-No `FREIGHT_IAP_AUDIENCE` and no access code: `FREIGHT_CHAT_USERS` alone selects
-the mode. Passwords are scrypt hashes in the secret and nowhere else; the login
-pins `user_id` to the username through the same helper IAP uses, so `judge1`
-and `judge2` never see each other's sessions, and `--allow-unauthenticated` is
-safe because the gate refuses everything but the form until a login succeeds.
-Rotate by minting again — a new table is a new signing key, so every cookie
-dies with the old passwords. Both chat services share the database: an email
-and a username are different identities, so nothing collides.
+`FREIGHT_SMTP_HOST` defaults to `smtp.gmail.com` and `FREIGHT_SMTP_PORT` to
+`587` (STARTTLS), so neither needs setting for Gmail. `FREIGHT_MAIL_FROM`
+defaults to the SMTP user.
 
-Why not only this, then? Because it is a shared secret handed around, and the
-project's own §4a says what that costs. Google sign-in remains the surface with
-real identities and an audit log; the demo login is the courtesy exit for a
-visitor who declines it. Offer both, say which is which, and retire the demo
-credentials when judging ends.
+**A missing sink or a missing password is an error *result*, not a silent
+downgrade to `spool`.** The decision page then says `⚠ APPROVED, NOT DELIVERED`,
+the grant is spent, and the ledger records the failure — because a send the
+operator believed went out and did not is the worst outcome this module has.
+Everything that does leave carries the `[Freight Ops demo]` subject prefix, the
+intended recipient in the body and in an `X-Freight-Demo-Intended-To` header,
+and a line saying every party in it is fictional. A real carrier must never
+receive one of these, and a judge's inbox must never mistake one for real.
+
+### 4.6 Letting the desk start the sweep
+
+The desk renders a **Run the sweep now** button whenever `FREIGHT_SWEEP_JOB` is
+set — §4.3 sets it to the Job's full resource name. `POST /sweep/run` then calls
+the Cloud Run Jobs REST API with the service's *own* credentials, which is the
+split that keeps the console's seal meaningful: `console.py` renders the button
+and holds no credential, `webapp.py` holds the token.
+
+Two grants, and the second is the one people forget:
+
+```bash
+# start the job
+gcloud run jobs add-iam-policy-binding "$JOB" --region "$REGION" \
+  --member "serviceAccount:$SA" --role roles/run.invoker
+
+# list its executions, so a second sweep is refused while one is running
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:$SA" --role roles/run.viewer
+```
+
+Without `run.viewer` the service cannot see that a sweep is already in flight,
+and the button either fails or starts a second run that holds every draft twice
+under a second set of approval ids. Two guards sit in the code as well: an
+execution without a completion time means the POST refuses with `· ALREADY
+RUNNING`, and a ten-minute cooldown means an impatient judge clicking four times
+starts one sweep. Anything else comes back as `⚠ NOT STARTED`, with the reason
+in the deployment log and nothing changed — the button never half-works.
+
+The Job itself is §5. Deploy that before you press this.
+
+### Verify it
+
+The first build takes 3–6 minutes. When it finishes you get a URL:
+
+```
+Service URL: https://freight-ops-fleet-XXXXXXXX-ew.a.run.app
+```
+
+```bash
+export URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')
+
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/"           # 200 — the homepage, public
+curl -s "$URL/reconcile.json"                              # {"diverged":false,...}, public
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/privacy"    # 200 — the consent screen links here
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/desk"       # 303 — to /access?next=/desk
+```
+
+`/`, `/privacy`, `/reconcile.json`, `/robots.txt` and `/healthz` need no login —
+the first two because Google's consent screen points at them, the rest because
+they are probes. Everything else sends a logged-out browser to
+`/access?next=<where they were going>` and refuses an API call with `403` JSON;
+a websocket is closed with code `4403` after the handshake rather than left
+hanging.
+
+**Do not probe `/healthz` on the public URL.** Google's frontend reserves that
+path on `run.app` hosts and answers its own 404, so the request never reaches
+the container. The route is fine; the hostname is the problem.
+
+Then open `$URL` in a browser. That is the demo surface: the homepage, **Sign in
+→**, and the desk. §8 is the full smoke test.
 
 ---
 
 ## 5. Deploy the sweep as a Job
 
 The sweep is not a web request — it is a scheduled batch run that must exit.
-Cloud Run **Jobs**, not Services. This and §4a are the only two deployments that
-call a model, so they are the only two that need model credentials — swap the
-`--set-secrets` line below for the Vertex variables if you are following §7a:
+Cloud Run **Jobs**, not Services:
 
 ```bash
-gcloud run jobs deploy "$JOB" \
-  --source . \
-  --service-account "$SA" \
-  --set-secrets "GOOGLE_API_KEY=gemini-api-key:latest" \
-  --set-env-vars "FREIGHT_MODEL=gemini-3.7-flash" \
+gcloud run jobs deploy "$JOB" --region "$REGION" --source . --service-account "$SA" \
   --command sh \
-  --args="-c,python -m freight_fleet.cli sweep; ec=\$?; cp /app/audit/ledger.jsonl /state/ledger.jsonl && cp /app/data/approvals.json /state/approvals.json; exit \$ec" \
-  --memory 1Gi \
-  --task-timeout 1800 \
-  --max-retries 0 \
-  --region "$REGION"
+  --args="-c,cp /state/ledger.jsonl /app/audit/ledger.jsonl 2>/dev/null || true; cp /state/approvals.json /app/data/approvals.json 2>/dev/null || true; python -m freight_fleet.cli sweep; ec=\$?; cp /app/audit/ledger.jsonl /state/ledger.jsonl && cp /app/data/approvals.json /state/approvals.json; exit \$ec" \
+  --add-volume "name=state,type=cloud-storage,bucket=$BUCKET" --add-volume-mount "volume=state,mount-path=/state" \
+  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_LEDGER_PATH=/app/audit/ledger.jsonl,FREIGHT_APPROVALS_PATH=/app/data/approvals.json" \
+  --memory 1Gi --cpu 1 --task-timeout 1800 --max-retries 0
 ```
 
-- **`--command` / `--args`** override the image's `CMD`, so the same image runs
-  the CLI instead of the API server. The `=` in `--args=` is load-bearing: the
-  value starts with a dash, and without `=` gcloud's parser reads it as another
-  flag and fails with "expected one argument" — in every shell, not just
-  PowerShell.
-- **Why `sh -c` and a copy at the end, not `python` straight onto `/state`.**
-  The sweep's agents append ledger rows concurrently and rewrite the approval
-  store on every hold. Through GCS-FUSE those small writes are not atomic, and
-  a real run died on `OSError: [Errno 116] Stale file handle` with its holds
-  lost from the store. So the Job writes to the container's local disk (the
-  image's default `FREIGHT_LEDGER_PATH` / `FREIGHT_APPROVALS_PATH`) and copies
-  the two finished files to the bucket once — GCS-FUSE's happy path. The
-  `exit $ec` keeps the sweep's own honest exit code. Consequence: each run
-  **replaces** the shared state, so decisions taken on the ops console before
-  a re-run are overwritten. Run the sweep once, then decide; do not schedule
-  it while a decided queue matters.
+**Read the wrapper left to right. It is four steps and each is there for a
+reason.**
+
+1. **Seed from the shared state.** The two leading `cp /state/… /app/…` lines
+   pull the current ledger and approval store *into* the container before the
+   sweep starts, so the run begins from what everyone else has already done.
+2. **Sweep on local disk.** The Job's `FREIGHT_LEDGER_PATH` and
+   `FREIGHT_APPROVALS_PATH` stay on `/app`, not on `/state`, deliberately: the
+   sweep's agents append ledger rows concurrently and rewrite the approval store
+   on every hold, and through GCS-FUSE those small writes are not atomic. A real
+   run died on `OSError: [Errno 116] Stale file handle` with its holds lost from
+   the store. Local disk is where many small writes belong.
+3. **Publish once at the end.** Two copies back to `/state` — GCS-FUSE's happy
+   path, and the only moment the shared record moves.
+4. **`exit $ec`** keeps the sweep's own honest exit code, so a partial run is
+   still reported as a failure even though the publish succeeded.
+
+**The seed step is new, and it is a bug fix rather than a refinement.** The old
+wrapper started from the image's empty ledger and *replaced* the shared state at
+the end, so every sweep silently wiped whatever a judge had approved, rejected
+or raised in chat since the last one. This guide used to carry that as a warning
+— "run the sweep once, then decide; do not schedule it while a decided queue
+matters" — which is a documented landmine, not a fixed one. Seeding first makes
+a run additive: it reads what is already there, appends its own holds, and
+publishes the union. The `|| true` on each seed copy is for the very first run,
+when the bucket is empty and the files do not exist yet.
+
+- **The `=` in `--args=` is load-bearing** — see the note at the top of this
+  document. So are the backslashes in `\$?` and `\$ec`: those dollar signs must
+  reach `sh` inside the container as literals, not be expanded by the shell you
+  are typing into.
 - **`--task-timeout 1800`** — six shipments at ~60s each, with headroom.
 - **`--max-retries 0`** — the sweep is **not idempotent**: every run that reaches
-  a shipment drafts a notice and holds it, so a second run holds a second copy of
-  the same draft under a second approval id. It also now exits non-zero when it
+  a shipment drafts a notice and holds it, so a second run holds a second copy
+  of the same draft under a second approval id. It also exits non-zero when it
   *skips* a shipment rather than only when it dies — which is the honest signal,
   but it means Cloud Run would retry a run that already held five of six drafts
   and hand the operator five duplicates. Retrying is the wrong response to a
   partial sweep. A failed execution is visible in the logs; re-run it by hand
   after reading them, once you know which shipments actually got through.
+- **No `--set-secrets`.** Like the Service, the Job is Vertex-only: the attached
+  service account *is* the credential (§7a), so there is no key to mount.
+
+**What the sweep drafts now is email.** It cross-checks each open shipment and,
+where the documents disagree, drafts the correction notice and calls
+`send_email` — which is CRITICAL with an external side effect in
+`governance.policy`, so the gate holds every one of them and nothing is sent. It
+no longer writes drafts to `outbox/`; a held file was a weaker demonstration
+than a held email, because a file has no recipient to get wrong. Those holds are
+what the desk approves, and §4.5 is where an approved one actually goes.
 
 Run it once by hand, on camera if you like:
 
@@ -1067,6 +960,9 @@ a sweep that silently skipped work is not a successful sweep:
 ```
   !! 1 of 6 shipment(s) were NOT checked: shp-005-air-dg
 ```
+
+Once §4.6's two IAM bindings are in place, exactly this run is also one click
+from the desk — which is the version a judge can drive themselves.
 
 ---
 
@@ -1091,6 +987,10 @@ gcloud run jobs add-iam-policy-binding "$JOB" \
   --role="roles/run.invoker"
 ```
 
+That is the same binding §4.6 makes for the desk's **Run the sweep now** button
+— one service account, one grant, two callers — so if you have already done §4.6
+this is a no-op.
+
 `0 6 * * 1-5` is 06:00 on weekdays. Freight desks do not sweep on Sunday.
 
 **The time is yours, not the app's.** Nothing in the code knows about 06:00 —
@@ -1101,8 +1001,10 @@ per deployment, per customer. There is deliberately no schedule setting inside
 the console: a screen that could edit the schedule would need credentials that
 mutate infrastructure, and the console's safety claim is that it holds none.
 The desk *displays* the cadence read-only from `FREIGHT_SWEEP_SCHEDULE` (set in
-§4) — if you change the cron here, update that env var to match, because the
-console repeats what you tell it and cannot check.
+§4.3) — if you change the cron here, update that env var to match, because the
+console repeats what you tell it and cannot check. The desk's button (§4.6) is
+the manual complement to this schedule, not a second one: it starts the same
+Job, and the Job holds the same drafts either way.
 
 Force a firing to prove the wiring without waiting for morning:
 
@@ -1137,20 +1039,18 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --role="roles/aiplatform.user"
 ```
 
-**Recommendation for the submission: skip both — unless you deploy §4d.**
-The kill-restart-resume property is already proven locally and on camera, and
-for the sweep and the CLI neither option adds a judgeable capability; they add
-operational durability the video cannot show. Spend the day on the recording
-instead.
+**The deployment takes option (a), and §4.2 has it concretely** — the Cloud SQL
+instance, the `freight-sessions-uri` secret and the exact URI form. Durable
+sessions are worth their cost where they are *judgeable*, and the chat is where
+they are: a judge signs in, asks about a shipment, comes back after the instance
+has been recycled, and the fleet either remembers or it does not — and they can
+see which. For the sweep and the CLI alone, neither option would add a
+capability a video can show; the kill-restart-resume property is already proven
+locally.
 
-That reasoning turns over exactly where this section said it would. **§4d's chat
-surface makes durable sessions judgeable**: a judge signs in, asks about a
-shipment, comes back after the instance has been recycled, and the fleet either
-remembers or it does not — and they can see which. So §4d does option (a),
-concretely, with the Cloud SQL instance, the `freight-sessions-uri` secret and
-the exact URI form. Option (b) stays skipped: Agent Engine would add
-`google-cloud-aiplatform` plus a regional resource to provision and delete, for
-the same durability §4d gets from a database this repo's code already opens.
+Option (b) stays skipped. Agent Engine would add `google-cloud-aiplatform` plus
+a regional resource to provision and delete, for the same durability §4.2 gets
+from a database this repo's code already opens.
 
 ---
 
@@ -1267,8 +1167,14 @@ If the score moves, that is a finding to report, not a number to quietly update.
 
 ### Deploy with it
 
-The sweep Job (§5) and the private ops console (§4a) are the only two that call
-models. Swap `--set-secrets` for the Vertex variables in both:
+**Both deployments in this guide are already Vertex-only.** §4.3 and §5 set
+`GOOGLE_GENAI_USE_VERTEXAI=TRUE`, `GOOGLE_CLOUD_PROJECT` and
+`GOOGLE_CLOUD_LOCATION`, and neither mounts an API key — so there is nothing to
+swap. This section is the *why*; §3's `roles/aiplatform.user` is the grant that
+makes it work.
+
+If you deployed the AI Studio path first and are switching now, the Job is
+simple, because its whole environment fits in one flag:
 
 ```bash
 gcloud run jobs update "$JOB" --region "$REGION" \
@@ -1276,23 +1182,22 @@ gcloud run jobs update "$JOB" --region "$REGION" \
   --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FREIGHT_MODEL=gemini-3.7-flash,FREIGHT_LEDGER_PATH=/app/audit/ledger.jsonl,FREIGHT_APPROVALS_PATH=/app/data/approvals.json"
 ```
 
-(The Job keeps the *local* paths — §5 explains the copy-at-end.)
+(The Job keeps the *local* paths — §5 explains the seed-and-publish wrapper.)
+
+The Service is not simple, and this is where people break it. `--clear-secrets`
+would also unmount the session URI, the user table and the invite code, and
+`--set-env-vars` would drop the sixteen variables §4.3 set. Remove only the key,
+and merge:
 
 ```bash
-gcloud run services update "$OPS" --region "$REGION" \
-  --clear-secrets \
-  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FREIGHT_MODEL=gemini-3.7-flash"
+gcloud run services update "$SERVICE" --region "$REGION" \
+  --remove-secrets GOOGLE_API_KEY \
+  --update-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global"
 ```
 
-Two things to watch. `--set-env-vars` **replaces the entire set**, so anything
-you set earlier (including the `FREIGHT_LEDGER_PATH` pair from §4b) must be
-repeated in the same flag or it is dropped — use `--update-env-vars` instead if
-you would rather merge. And `--clear-secrets` is what actually removes the AI
-Studio key; without it the key stays mounted and you are back to two billing
-paths.
-
-The **public** console (§4) needs none of this. It calls no model, so it takes
-no credentials of either kind.
+`--set-*` replaces the entire set; `--update-*` merges. That one distinction is
+the most common way this deployment loses its login halfway through an unrelated
+change.
 
 ### Then delete the key
 
@@ -1311,50 +1216,54 @@ notices has leaked.
 ## 8. Smoke-testing the deployment
 
 Run these in order. Each one fails loudly and tells you which step to go back
-to, so do not skip ahead when one is red.
+to, so do not skip ahead when one is red. Steps 1–2 and 5 are `curl`; the rest
+need a browser, because the thing being tested is a login.
 
-**1. The service is up and the container is healthy.**
+**1. The service is up, and the door is a door.**
 
 ```bash
 export URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')
-curl -s -o /dev/null -w '%{http_code}\n' "$URL/"   # expect: 200
+
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/"                 # 200 — the homepage
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/desk"             # 303 — to /access?next=/desk
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$URL/upload"   # 403 — JSON "login required"
 ```
 
 (Not `/healthz` — Google's frontend swallows that path on `run.app` hosts; see
-Troubleshooting.)
+Troubleshooting.) A **200 on `/desk`** from a cookieless `curl` means no
+credentials reached the container, so the gate is in its pass-everything local
+mode. Look at what is actually mounted:
+
+```bash
+gcloud run services describe "$SERVICE" --region "$REGION" \
+  --format='value(spec.template.spec.containers[0].env)'
+```
 
 **2. The record and the queue agree.** This is the governance healthcheck, and
 it is the one worth watching:
 
 ```bash
 curl -s "$URL/reconcile.json" | python3 -m json.tool
-# expect "diverged": false on a fresh deploy
+# expect "diverged": false
 ```
 
-`diverged: true` on a *fresh* deploy means the mount in §4b is wrong — usually
-the console reading a different path from the Job. It is not a code failure.
+`diverged: true` right after a deploy means the mount is wrong — usually the
+Service and the Job pointed at different paths. It is not a code failure.
 
-**3. Every screen renders.** A 500 here is almost always a missing artifact, not
-a bug:
+**3. Both ways in work.** Open `$URL`, click **Sign in →**, and use one of the
+demo usernames from §4.4. Then, in a private window, use the Google panel with
+the invite code. Both should land on `/desk`, and the nav should offer **Sign
+out** — that is `FREIGHT_GATED=1` doing its one job. A missing panel means its
+variables are not all set; a `redirect_uri_mismatch` means the callback URL
+registered on the OAuth client is not byte-identical to
+`FREIGHT_GOOGLE_REDIRECT_URI`.
 
-```bash
-for path in / /ledger /fleet /evidence; do
-  printf '%-12s %s\n' "$path" "$(curl -s -o /dev/null -w '%{http_code}' "$URL$path")"
-done
-# expect 200 200 200 200
-```
+**4. Every screen renders.** Signed in, walk `/desk`, `/ledger`, `/fleet`,
+`/evidence`, `/sent` and `/chat`. A 500 here is almost always a missing
+artifact, not a bug.
 
-**4. The public surface really cannot decide.** Prove the read-only flag rather
-than trusting it — take any id from `/reconcile.json` and try to approve it:
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X POST "$URL/decision/any-id-here/approve"
-# expect 403 — if this returns 302 or 200, FREIGHT_CONSOLE_READONLY is not set
-```
-
-**5. The fleet actually reasons.** This is the first step that spends money and
-the first that needs the API key, so a failure here is credentials or model
-name, not plumbing:
+**5. The fleet actually reasons, unattended.** The first step that spends money,
+so a failure here is credentials or model name, not plumbing:
 
 ```bash
 gcloud run jobs execute "$JOB" --region "$REGION" --wait
@@ -1370,89 +1279,117 @@ Two lines in that output matter — the tally, and the skip line if there is one
   !! 1 of 6 shipment(s) were NOT checked: shp-005-air-dg
 ```
 
-**6. The holds reached the console.** Refresh the public URL. If §4b is wired,
-the desk now shows the drafts the Job just held. If it still says the desk is
-clear, the Job and the console are not sharing a bucket — go back to §4b.
+**6. The holds reached the desk.** Refresh `/desk`: the drafts the Job just held
+are in the queue. If it is still clear, the Job and the Service are not sharing
+a bucket — go back to §4.1. This is the most common cloud-only failure there is.
 
-**7. A decision executes, once.** In the authenticated tunnel
-(`gcloud run services proxy "$OPS" --port 8081`), approve one draft, then check
-the record:
+**7. A decision executes, once, and something actually leaves.** Open a held
+`send_email`, read the draft and the evidence — the documents the agent read
+before drafting — and approve it. You want:
+
+- the strip saying `✓ APPROVED — send_email executed`, with a link to **Sent**;
+- `/sent` showing that message with **intended** and **delivered** recipients as
+  two different things;
+- `/ledger` showing `held`, then `approved`/`executed`, carrying **your**
+  identity, not the word "operator";
+- and a second approval of the same id refusing with `· ALREADY DECIDED`,
+  because the grant is single-use.
+
+`⚠ APPROVED, NOT DELIVERED` means the SMTP transport is on and its credentials
+or sink are wrong — §4.5. On the default `spool` transport this cannot happen.
+
+**8. A chat hold lands on the same desk.** Open `/chat`, ask the fleet for
+something that ends in a notice being sent, and watch the gate stop it. Then go
+back to `/desk`: the hold is in the same queue as the sweep's, with your name on
+it. **This is the check the old four-service shape could not pass**, and it is
+the single best thirty seconds of the demo.
+
+**9. An upload survives a restart.** Upload a PDF from `fixtures/raw/` through
+`/chat`, watch it get transcribed, and ask the fleet to read it back. Then force
+a new revision and confirm it is still there — the durable copy under
+`/state/uploads` is restored into the workspace on container start:
 
 ```bash
-curl -s "$URL/ledger.jsonl" | tail -3
+# any env-var change makes a new revision; the app ignores this one entirely
+gcloud run services update "$SERVICE" --region "$REGION" \
+  --update-env-vars "FREIGHT_DEPLOY_NONCE=$(date +%s)"
 ```
 
-You should see `held` then `executed` for that id — and approving the same id a
-second time must refuse, because the grant is single-use.
-
-**8. The chat surface refuses an anonymous caller** (only if you deployed §4d).
-The thing to prove here is the *refusal*, because the failure that matters fails
-open — an unauthenticated 200 means IAP is not actually in front:
+**10. The button starts the job.** Press **Run the sweep now** on the desk. You
+want `✓ SWEEP STARTED`; press it again immediately and you want `· ALREADY
+RUNNING`. A `⚠ NOT STARTED` is IAM — §4.6 — and the reason is in the log:
 
 ```bash
-export CHAT_URL=$(gcloud run services describe "$CHAT" --region "$REGION" --format='value(status.url)')
-curl -s -o /dev/null -w '%{http_code}\n' "$CHAT_URL/"
-# expect 302 (IAP redirecting to the Google sign-in) — never 200
+gcloud run services logs read "$SERVICE" --region "$REGION" --limit 50
 ```
 
-A `403` here is also fine and means the same thing. A `200` means either `--iap`
-did not take or `--no-allow-unauthenticated` was dropped; go back to §4d before
-the URL goes anywhere near a submission form. Then open the URL in a browser,
-sign in, send one message, sign out and back in, and confirm the conversation is
-still listed — that round trip is the only check that proves `FREIGHT_SESSIONS_DB`
-reached the container rather than ADK falling back to memory in silence.
+**11. Sessions survive the container.** After step 9's restart, sign back in and
+confirm the conversation from step 8 is still listed. That round trip is the
+only check that proves `FREIGHT_SESSIONS_DB` reached the container rather than
+ADK falling back to in-memory sessions in silence.
 
 ---
 
 ## 9. Running the demo
 
-The five minutes, in the order that makes the argument. Have two windows open:
-the **public URL** in a browser, and a terminal.
+The five minutes, in the order that makes the argument. One browser window on
+the service URL is all you need now — there is no second URL and no tunnel.
 
 **Before you start recording**
 
-- Run the sweep once (§8 step 5) so the desk has real holds. A demo that begins
-  with an empty queue spends its first minute creating one.
-- Open the authenticated tunnel and leave it running: `gcloud run services proxy "$OPS" --region "$REGION" --port 8081`.
+- Run the sweep once (§8 step 5, or the desk button) so the queue has real
+  holds. A demo that begins with an empty queue spends its first minute creating
+  one.
+- Sign in beforehand and leave the tab open. The login is worth twenty seconds
+  on camera, not sixty.
 - `curl -s -o /dev/null "$URL/"` — a cold start takes a few seconds and you do
   not want that pause on camera.
 
 **The run of show**
 
-1. **The desk (public URL, ~40s).** Open `/`. Point at the pending count. "Five
-   drafts are waiting. Nobody was watching when they were written — a scheduled
-   job at 06:00 checked six shipments and stopped at the gate."
-2. **One decision (~60s).** Open a held action. Show the draft, and the
-   *evidence* — the documents the agent read before drafting. Then try to
-   approve **on the public URL** and let it refuse. "This surface can't decide.
-   The buttons aren't disabled by CSS; the route returns 403."
-3. **The approval (~40s).** Switch to `localhost:8081` — same image, one flag
-   different — and approve it. Show the file appearing.
-4. **The record (~50s).** Open `/ledger`. Every call the fleet made, with the
-   verdict and the outcome. Point at the sha256 of the file as served: "you can
+1. **The front door (~20s).** `/` — what this is in five sentences, and one
+   button. Sign in with a demo username. "No Google account needed. The username
+   is the identity here, and it goes on every row I decide."
+2. **The desk (~40s).** Point at the pending count. "Five drafts are waiting.
+   Nobody was watching when they were written — a scheduled job at 06:00
+   cross-checked six shipments and stopped at the gate."
+3. **One decision (~60s).** Open a held `send_email`. Show the drafted notice,
+   the contract that held it, and the *evidence* — the documents the agent read
+   before drafting. Approve it.
+4. **What actually left (~30s).** `/sent`. The message, with its **intended**
+   recipient and its **delivered** recipient side by side. "The model drafted a
+   carrier's address. It was never used as one. Delivery goes to the demo
+   mailbox and to the person who approved it."
+5. **Ask the fleet (~60s).** `/chat`. Ask something that ends in a send, and
+   watch the gate hold it — then go back to `/desk` and show that hold sitting
+   in the same queue as the sweep's. "Same gate, same ledger, whether a schedule
+   raised it at 06:00 or I raised it just now."
+6. **The record (~40s).** `/ledger`. Every call the fleet made, with the verdict,
+   the outcome and who decided. Point at the sha256 of a written file: "you can
    recompute this with `shasum -a 256`."
-5. **The scoreboard (~60s).** Open `/evidence`. 7/7, three runs of three, and
-   the clean control — the shipment with nothing wrong with it, graded with zero
+7. **The scoreboard (~40s).** `/evidence`. 7/7, three runs of three, and the
+   clean control — the shipment with nothing wrong with it, graded with zero
    tolerance. "A missed discrepancy costs a correction. A fabricated one costs
    trust."
-6. **The close (~30s).** `/fleet` — five desks, and the tool each is allowed. "One
-   gate, one ledger, one eval. The governance isn't five prompts asking nicely;
-   it's one code path every tool call goes through."
+8. **The close (~30s).** `/fleet` — five desks, and the tool each is allowed.
+   "One gate, one ledger, one eval. The governance isn't five prompts asking
+   nicely; it's one code path every tool call goes through."
 
-**If the cut allows more than five minutes**, two additions earn their seconds
-and neither belongs in the six above — the run of show is an argument, and both
-of these are supporting evidence rather than a step in it:
+**If the cut allows more than five minutes**, three additions earn their seconds
+and none belongs in the eight above — the run of show is an argument, and these
+are supporting evidence rather than steps in it:
 
-- **The front door (§1a, local terminal, ~40s).** `ingest --dry-run` to show 26
+- **Upload a document (~30s).** Drop a scan into `/chat`, watch it get
+  transcribed on the spot, and ask a question about it. It is the fastest way to
+  show the fleet reading something the *judge* chose.
+- **Run the sweep now (~20s).** Press the desk button and let the flash say
+  `✓ SWEEP STARTED`. It makes the unattended half something a judge can start
+  themselves, which is worth more than a screenshot of Cloud Scheduler.
+- **The front door in a terminal (§1a, ~40s).** `ingest --dry-run` to show 26
   PDFs and scans planned, the real run on one file, and the resulting
   `inbox/*.md` with its `<!-- transcribed ... -->` first line. This is the one
   paid step an operator runs by hand, which is why it is a terminal and not a
   URL.
-- **The chat surface (§4d, browser, ~60s).** Sign in, ask it to read
-  `raw/inbox/scan_001.pdf` and let it refuse with `binary`, then ask a real
-  question. Say plainly that a hold raised here lands in that container's
-  disposable ledger and is not the record you approved in step 3 — the
-  distinction is worth more on camera than the extra feature is.
 
 **What to say if something breaks on camera.** The honest line is the strong
 one: the URL is the demo surface, not the proof. The ledger and the scoreboard
@@ -1463,61 +1400,86 @@ eight seconds does not weaken the argument.
 
 ## 10. Locking it down after the hackathon
 
-If you followed §4 and §4a, the public service is already read-only and the
-decision routes already live behind IAM, so there is less to do here than there
-would otherwise be — the open URL exposes rendered artifacts and nothing that
-acts. What it still is, is a permanent public endpoint you are no longer
-watching. When the judging window closes, close it:
+What is left running is a public URL with a login in front of it and a live
+model behind it, a database that bills while idle, and a sweep that spends money
+on a schedule. When the judging window closes, close it.
+
+### The complete shutdown
+
+Deleting the two deployments stops every recurring cost except the bucket:
 
 ```bash
-gcloud run services update "$SERVICE" --no-allow-unauthenticated
-```
-
-and reach it through an authenticated proxy instead:
-
-```bash
-gcloud run services proxy "$SERVICE" --region "$REGION"   # then use localhost:8080
-```
-
-### The rest of the teardown
-
-§4d and §4c add things that either stay open or keep billing, so they need
-deleting rather than tightening. In this order:
-
-```bash
-# 1. Close the chat surface's open door first — before deleting anything else,
-#    so there is no window where the service is up and unlisted.
-gcloud iap web remove-iam-policy-binding \
-  --resource-type=cloud-run --service="$CHAT" --region="$REGION" \
-  --member=allAuthenticatedUsers --role=roles/iap.httpsResourceAccessor
-
-# 2. The chat service itself.
-gcloud run services delete "$CHAT" --region "$REGION"
-
-# 3. The session database. THIS is the line item that bills while nobody is
-#    looking — Cloud Run scales to zero, Cloud SQL does not.
-gcloud sql instances delete freight-sessions
-
-# 4. The secret that pointed at it, now a live password for nothing.
-gcloud secrets delete freight-sessions-uri
-
-# 5. The public sandbox (§4c) and its disposable bucket.
-gcloud run services delete "$SANDBOX" --region "$REGION"
-gcloud storage rm --recursive "gs://$SANDBOX_BUCKET"
-
-# 6. Stop the morning sweep from spending money on an audience of nobody.
+gcloud run services delete "$SERVICE" --region "$REGION"
+gcloud run jobs delete "$JOB" --region "$REGION"
 gcloud scheduler jobs delete freight-ops-morning-sweep --location "$REGION"
+
+# THIS is the line item that bills while nobody is looking — Cloud Run scales
+# to zero, Cloud SQL does not.
+gcloud sql instances delete freight-sessions
+gcloud secrets delete freight-sessions-uri      # now a live password for nothing
 ```
 
-Leave `$BUCKET` (§4b) alone if you want to keep the ledger the demo was built
-on — it holds a few hundred KB and costs approximately nothing. Delete the
-custom OAuth client too if you are done with IAP on this project; an unused
-OAuth client with a live secret is the same category of thing as the unused API
-key §7a tells you to revoke.
+Then the credentials that outlive their service. Delete the OAuth client in
+**APIs & Services → Credentials**: an unused OAuth client with a live secret is
+the same category of thing as the unused API key §7a tells you to revoke. Same
+for `freight-smtp-password` if you set up SMTP — a Gmail App Password that still
+works is a credential nobody is watching.
+
+### Or: keep it up, and shut the door
+
+Revoke the credentials rather than the service. Rotating or removing any one of
+the three invalidates every outstanding cookie, because the cookie's signing key
+is derived from all of them:
+
+```bash
+# retire the demo logins
+gcloud run services update "$SERVICE" --region "$REGION" --remove-secrets FREIGHT_CHAT_USERS
+
+# and/or retire Google sign-in
+gcloud run services update "$SERVICE" --region "$REGION" \
+  --remove-secrets FREIGHT_GOOGLE_CLIENT_SECRET \
+  --remove-env-vars FREIGHT_GOOGLE_CLIENT_ID,FREIGHT_GOOGLE_REDIRECT_URI
+```
+
+Removing **both** leaves the invite code alone in front of the app, which is the
+old IAP-era mode and pins no identity — so remove the code too, or the service
+becomes a shared-password box. Deleting the Cloud Scheduler job and unsetting
+`FREIGHT_SWEEP_JOB` is what stops it spending; the login stops strangers, not
+the schedule.
+
+Leave `$BUCKET` alone if you want to keep the ledger the demo was built on — it
+holds a few hundred KB and costs approximately nothing, and it is the only copy
+of what happened.
 
 `eval.yml`'s `schedule:` also keeps spending after the window closes. Comment it
 out (§11) or the Monday-morning eval bills you for a repository nobody is
 judging any more.
+
+### Tearing down the old four-service shape
+
+If you deployed an earlier version of this guide, these still exist and some of
+them are still open to the internet. They are no longer part of the deployment.
+Do IAP's IAM removal **first**, before the service it protects is deleted, so
+there is no window where a binding outlives the thing you were watching:
+
+```bash
+gcloud iap web remove-iam-policy-binding \
+  --resource-type=cloud-run --service=freight-ops-chat --region="$REGION" \
+  --member=allAuthenticatedUsers --role=roles/iap.httpsResourceAccessor
+
+gcloud run services delete freight-ops-chat       --region "$REGION"   # the chat behind IAP
+gcloud run services delete freight-ops-chat-demo  --region "$REGION"   # the chat with a demo login
+gcloud run services delete freight-ops-sandbox    --region "$REGION"   # the public sandbox
+gcloud run services delete freight-ops-console    --region "$REGION"   # the private ops console
+
+gcloud storage rm --recursive "gs://${PROJECT_ID}-freight-sandbox"     # the sandbox's disposable bucket
+```
+
+Then delete **IAP's** OAuth client — the one whose authorised redirect URI was
+`https://iap.googleapis.com/v1/oauth/clientIds/…:handleRedirect`. It is a
+different client from the one §4.4 creates, and leaving it is leaving a live
+secret behind. `allAuthenticatedUsers` bindings carry no expiry condition;
+nothing removes them for you.
 
 ---
 
@@ -1587,7 +1549,7 @@ gcloud iam workload-identity-pools providers describe freightopsfleet \
 ```
 
 **Why a second service account and not `freight-fleet@`.** The runtime SA holds
-`roles/storage.objectAdmin` on the ledger buckets (§4b, §4c). CI must not be able
+`roles/storage.objectAdmin` on the state bucket (§4.1). CI must not be able
 to touch the audit record — an eval that could rewrite the ledger it is
 measuring is not evidence of anything. `freight-eval@` holds
 `roles/aiplatform.user` and nothing else, which is precisely the permission "may
@@ -1662,32 +1624,37 @@ behind.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `/healthz` returns Google's HTML "404!!1" page while other routes work | Google's frontend reserves `/healthz` on `run.app` hosts — the request never reaches the container | Probe `/` or `/reconcile.json` instead. The route itself is fine and answers through the §4a proxy. |
-| `Service URL returns 404 on /list-apps` | `adk api_server` was pointed at the wrong folder | The `CMD` must end with `/app/agents` — the folder *containing* `freight_ops/`, not the agent folder itself. |
+| `/healthz` returns Google's HTML "404!!1" page while other routes work | Google's frontend reserves `/healthz` on `run.app` hosts — the request never reaches the container | Probe `/` or `/reconcile.json` instead. The route itself is fine and answers anywhere the hostname is not `*.run.app`. |
+| `404` on `/list-apps`, `/run_sse` or `/dev-ui/` | `FREIGHT_AGENTS_DIR` points at the wrong folder | It must be `/app/agents` — the folder *containing* `freight_ops/`, not the agent folder itself. |
 | `No module named freight_fleet` | `pip install .` ran before `src/` was copied | Keep the Dockerfile's COPY order: `pyproject.toml` + `src/`, then install. |
-| `ValueError: No API key was provided` | Secret not mounted, or the SA lacks `secretAccessor` | `gcloud run services describe $SERVICE --format='value(spec.template.spec.containers[0].env)'` and re-check §3. |
-| Request dies at ~5 minutes | Cloud Run default 300s timeout | `--timeout 600` (§4). |
-| `gcloud run deploy` fails with no Dockerfile / nothing to build | Not run from the repo root | `--source .` uploads the current directory — `cd` into the clone first. See §0. |
-| Console shows an empty desk right after the sweep held drafts | Job and Service have separate filesystems | Mount one bucket into both — §4b. This is the most common cloud-only failure. |
-| Sweep dies with `FileNotFoundError: .../workspace/shipments` | Image built before the Dockerfile's seed step — `/app/workspace` is empty | Rebuild with the current Dockerfile (it runs `seed_workspace.py --all` at build time), then redeploy the Job and both consoles from the same source. |
-| `POST /decision/.../approve` returns 302 on the public URL | `FREIGHT_CONSOLE_READONLY` not set | Redeploy §4 with the flag; verify with §8 step 4 before demoing. |
-| `reconcile.json` says `diverged: true` on a fresh deploy | Console and Job reading different paths | Check both carry the same `FREIGHT_LEDGER_PATH` / `FREIGHT_APPROVALS_PATH`. |
-| 404 or `model not found` after switching to Vertex | Model id or endpoint differs on Vertex | See §7a — set `FREIGHT_MODEL` from `gcloud ai models list`; try `GOOGLE_CLOUD_LOCATION=global` before a region. |
-| `Could not resolve project using application default credentials` | No ADC on the machine | Locally: `gcloud auth application-default login`. On Cloud Run: the service was deployed without `--service-account`. |
+| The **Google sign-in** panel is missing from `/access` | The panel renders only when all three of `FREIGHT_GOOGLE_CLIENT_ID`, `FREIGHT_GOOGLE_CLIENT_SECRET` and `FREIGHT_GOOGLE_REDIRECT_URI` are set — one missing and it silently does not appear | `gcloud run services describe "$SERVICE" --format='value(spec.template.spec.containers[0].env)'`, then §4.4. The same is true of the demo-login panel and `FREIGHT_CHAT_USERS`. |
+| Google answers `redirect_uri_mismatch` | The callback registered on the OAuth client is not byte-identical to `FREIGHT_GOOGLE_REDIRECT_URI` | Register `https://<service-url>/auth/google/callback` exactly — scheme, host, no trailing slash — and set the env var to the same string. Nothing else produces this error. |
+| The desk opens with no sign-in at all | Nothing is configured, so the gate is in `off` mode and passes everything through | That is the local-development shape, not a deployment. Mount `freight-chat-users` and/or the Google client — §4.4. |
+| `/access` shows only a bare "enter the access code" form | `FREIGHT_CHAT_ACCESS_CODE` is set but neither users nor Google are | Code-alone is the old IAP-era mode, where something in front already knew who you were. It pins no identity, so ledger rows lose their name. Add a login — §4.4. |
+| A decision page says `⚠ APPROVED, NOT DELIVERED` | `FREIGHT_MAIL_TRANSPORT=smtp` and the credentials or the sink are wrong. The grant is spent and the message did not leave — deliberately not a silent downgrade to `spool` | Check `FREIGHT_SMTP_USER`, the `freight-smtp-password` secret (a Gmail **App Password**, which requires 2-Step Verification on that account) and `FREIGHT_MAIL_SINK` — §4.5. |
+| **Run the sweep now** flashes `⚠ NOT STARTED` | The service cannot start or cannot list the Job | Both bindings are needed: `roles/run.invoker` on the Job **and** `roles/run.viewer` on the project — §4.6. The reason is in `gcloud run services logs read "$SERVICE" --region "$REGION"`. |
+| **Run the sweep now** flashes `· ALREADY RUNNING` when nothing looks like it is | The ten-minute cooldown, or an execution that has not reported completion yet | Wait. `gcloud run jobs executions list --job="$JOB" --region="$REGION"` says which of the two it is. |
+| A sweep wiped decisions a judge had already taken | The **old** wrapper started from the image's empty ledger and *replaced* the shared state at the end | Redeploy the Job with the seeded wrapper in §5 — the two `cp /state/… /app/…` lines at the front are the entire fix. |
+| Desk shows an empty queue right after the sweep held drafts | Job and Service have separate filesystems | Mount one bucket into both — §4.1. This is the most common cloud-only failure. |
+| `reconcile.json` says `diverged: true` on a fresh deploy | Service and Job reading different paths | The Service uses `/state/...`; the Job uses `/app/...` and publishes to `/state` at the end. Check both env sets against §4.3 and §5. |
+| Sweep dies with `FileNotFoundError: .../workspace/shipments` | Image built before the Dockerfile's seed step — `/app/workspace` is empty | Rebuild with the current Dockerfile (it runs `seed_workspace.py --all` at build time), then redeploy both the Service and the Job from the same source. |
+| Uploads vanish after a cold start | `FREIGHT_UPLOADS_DIR` unset, so nothing was copied to the bucket | Set it to `/state/uploads` — §4.3. The workspace itself is always ephemeral; the durable copy is what gets restored on start. |
+| Chat sessions vanish between visits | `FREIGHT_SESSIONS_DB` unset, so ADK fell back to in-memory sessions with no warning | Mount `freight-sessions-uri` — §4.2 — and confirm with `gcloud run services describe`. |
+| `Failed to create database engine` | A sync database URL | An async driver is required: `postgresql+asyncpg://…` in the cloud, `sqlite+aiosqlite:///…` locally. Never a bare `sqlite://`. |
+| `ValueError: No API key was provided` | The container has neither the Vertex variables nor a key | The deployed shape sets `GOOGLE_GENAI_USE_VERTEXAI=TRUE` and `GOOGLE_CLOUD_PROJECT` — §7a. Check them with `gcloud run services describe`. |
+| 404 or `model not found` after switching to Vertex | Model id or endpoint differs on Vertex | §7a — set `FREIGHT_MODEL` from `gcloud ai models list`; try `GOOGLE_CLOUD_LOCATION=global` before a region. |
 | `403 Permission denied` on a Vertex call | Service account lacks the role | `roles/aiplatform.user` on `$SA` — §7a. Also check `aiplatform.googleapis.com` is enabled. |
-| SDK logs that it chose one credential over another | Both `GOOGLE_API_KEY` and Vertex vars are set | Expected precedence, but ambiguous billing. `--clear-secrets` on the Job and ops console. |
-| Sandbox or console shows old state up to a minute after a copy into the bucket | GCS-FUSE metadata cache (60s TTL) on the reader | Wait a minute, or restart the revision. Not a data loss. |
-| Env vars you set earlier vanished after an update | `--set-env-vars` replaces the whole set | Repeat them all in one flag, or use `--update-env-vars` to merge. |
+| `Could not resolve project using application default credentials` | No ADC on the machine | Locally: `gcloud auth application-default login`. On Cloud Run: the service was deployed without `--service-account`. |
+| SDK logs that it chose one credential over another | Both `GOOGLE_API_KEY` and the Vertex variables are set | Expected precedence, but ambiguous billing. Remove the key — §7a. |
+| Env vars or secrets you set earlier vanished after an update | `--set-env-vars` / `--set-secrets` replace the whole set | Use `--update-env-vars` / `--update-secrets` to merge. The Service carries three secrets and sixteen env vars; retyping them all to change one is how this breaks. |
+| The desk shows old state for up to a minute after a `gcloud storage cp` into the bucket | GCS-FUSE metadata cache (60s TTL) on the reader | Wait a minute, or deploy a new revision. Writes the container makes itself are visible to it immediately. Not data loss. |
+| Request dies at ~5 minutes | Cloud Run's default 300s timeout | `--timeout 600` — §4.3. |
+| `gcloud run deploy` fails with no Dockerfile / nothing to build | Not run from the repo root | `--source .` uploads the current directory — `cd` into the clone first. See §0. |
 | Agent answers "not found" for every document | Workspace never seeded | The image must contain `fixtures/`; check `.dockerignore` does not exclude it. |
-| `Failed to create database engine` | A sync SQLite URL | Async driver required: `sqlite+aiosqlite:///...`, not `sqlite:///...`. |
-| Sweep job succeeds but writes files | Gate bypassed — **stop and investigate** | This must be impossible; `outbox/` should be empty after a sweep. Read the ledger before deploying further. |
+| Agent answers `{"status": "binary"}` for a document | Correct behaviour: `read_file` reads only `.md`, `.csv` and `.txt` | Transcribe it first (§1a), or upload it through `/chat`, which transcribes on the spot. This is a refusal, not a failure. |
 | `ingest` prints "nothing to ingest" | Workspace seeded without `--all`, so there is no `raw/` | `python scripts/seed_workspace.py --all` — §1a. `--dry-run` needs no credentials, so this is free to re-check. |
-| Agent answers `{"status": "binary"}` for a document | Correct behaviour: `read_file` reads only `.md`, `.csv`, `.txt` | Transcribe it first (§1a), or point the agent at the canonical markdown. This is a refusal, not a failure. |
 | Eval score moved after an `ingest --force` | The eval grades whatever the workspace holds and never seeds | `python scripts/seed_workspace.py --all --clean`, then re-run — §1a. |
-| Nobody can sign in to the chat service; IAP refuses every account | IAP's Google-managed OAuth client admits only in-organization identities, and this project has no organization | Create the custom OAuth client — §4d. No IAM binding fixes this one. |
-| Chat sessions vanish between visits | `FREIGHT_SESSIONS_DB` unset, so ADK fell back to in-memory sessions with no warning | Mount `freight-sessions-uri` (§4d) and confirm with `gcloud run services describe "$CHAT" --format='value(spec.template.spec.containers[0].env)'`. |
-| Chat 403s every request with a valid Google sign-in | `FREIGHT_IAP_AUDIENCE` does not match this service | It is `/projects/PROJECT_NUMBER/locations/REGION/services/SERVICE` with the **numeric** project number — §4d. Failing closed here is the intended behaviour. |
-| `gcloud run services proxy` on the chat service returns 403 | IAP expects a browser sign-in flow a CLI tunnel cannot perform | Open the service URL in a browser instead — §4d. |
+| Sweep job succeeds but writes files or sends mail | Gate bypassed — **stop and investigate** | This must be impossible: a sweep holds every `send_email` and writes nothing. Read the ledger before deploying anything further. |
 | The eval workflow fails at `google-github-actions/auth` | The WIF provider condition did not match the run's OIDC claims | Check `repository_id`, `repository_owner_id` and `event_name` against §11. A fork, or a `pull_request` run, is *supposed* to fail here. |
 
 ---
@@ -1701,6 +1668,11 @@ doing less work than it appears:
   governance property — that is proven by the ledger and the scoreboard, both of
   which run identically on a laptop. The console makes both *legible* at the URL;
   it does not make either more true.
-- The container's workspace is **ephemeral**. Approvals granted against the
-  deployed service do not survive a cold start unless you mount durable storage.
-  The local CLI is the honest approval surface; the URL is the demo surface.
+- The container's **workspace** is still ephemeral: the documents the fleet
+  reads are baked into the image and reset with every container, and a judge's
+  uploads survive only because §4 copies them to the state bucket and restores
+  them on start. What *is* durable is the part that matters — the ledger, the
+  approval store and the mail spool all live on that bucket, so a decision taken
+  at the URL survives the cold start after it. The local CLI and the deployed
+  desk are now the same approval surface over the same record, which is the one
+  thing the four-service shape could not say.

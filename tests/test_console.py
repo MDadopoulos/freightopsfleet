@@ -533,7 +533,7 @@ def test_approving_a_send_delivers_to_the_spool_and_names_the_approver(world, he
     assert len(sent) == 1
     assert sent[0]["intended_to"] == "ops@carrier.example"
     assert sent[0]["delivered_to"] == [], "no sink, no approver address: the spool is the mailbox"
-    assert sent[0]["approved_by"] == ""
+    assert sent[0]["approved_by"] == "judge2", "the spool names who clicked, address or not"
     page = world.client.get("/sent").text
     assert "Discrepancy notice" in page and "ops@carrier.example" in page and "1 message left" in page
     # the desk's transmitted count is a fact now

@@ -1979,9 +1979,10 @@ def approve(approval_id: str, request: Request):
     if not _known(approval_id, pending, load_ledger()):
         return _not_found("Not in evidence", "No held action carries this id.")
     actor = _who(request)
-    # The approver's identity rides into `send_email` through a contextvar, so a
-    # judge who signed in with an address gets the copy — see tools/mail.py.
-    token = mail.APPROVER.set(actor if "@" in actor else "")
+    # The approver's identity rides into `send_email` through a contextvar: the
+    # spool names them, and one who signed in with an address gets the copy —
+    # tools/mail.py decides which of those a bare username qualifies for.
+    token = mail.APPROVER.set(actor)
     try:
         result = execute_approved(
             approval_id,
