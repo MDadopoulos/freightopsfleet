@@ -1,0 +1,16 @@
+# What `gcloud run deploy --source .` uploads. Without this file gcloud derives
+# its ignore list from .gitignore, and .gitignore hides eval/runs/*.json (the run
+# records are hand-committed with `git add -f`) — so the scoreboard's records
+# never reached the image. The answer keys are excluded here AND in .dockerignore.
+.git/
+.venv/
+venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.env
+workspace/
+audit/
+data/
+eval/answer_keys/
