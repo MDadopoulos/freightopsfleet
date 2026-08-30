@@ -118,7 +118,10 @@ libraries read. Skipping the second is the most common reason §7a's test fails
 with "could not resolve project using application default credentials".
 
 The local venv is only needed for the §7a test and the eval — the Cloud Run
-builds do not use it, and `.dockerignore` keeps it out of the upload.
+builds do not use it, and `.gcloudignore` keeps it out of the upload. That
+file exists on purpose: without it gcloud derives the upload list from
+`.gitignore`, which hides `eval/runs/*.json` (the run records are committed
+with `git add -f`), and the Scoreboard page deploys empty.
 
 ### Either way, you need
 
