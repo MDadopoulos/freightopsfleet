@@ -26,7 +26,7 @@ decision you make. Everything below sits behind that one login, on one nav.
 | **Desk** — `/desk` | The approval queue. Open a held email: the draft, the contract for what approving it does, and the documents the agent read to write it. **Approve** or **Reject** — the buttons are live, and the ledger row carries your name. |
 | **Ask the fleet** — `/chat` | Ask the agents something, upload a scan, watch the routing and every tool call in the trace. A hold raised here lands on the Desk. |
 | **Sent** — `/sent` | What actually left: the subject, the address the fleet drafted for, where it was really delivered, and who approved it. |
-| **Ledger · Fleet · Evidence** | The append-only record; the catalog, where each agent declares its owner, data scope and tool allow-list; the documents and the scoreboard. |
+| **Ledger · Fleet · Scoreboard** | The append-only record; the catalog, where each agent declares its owner, data scope and tool allow-list — read-only by design; and the graded run (7/7) with the documents behind it. |
 
 The buttons work for everyone signed in — this is the same unrestricted system
 the operator uses, not a demo mode of it. What makes that safe is the data:
@@ -76,6 +76,12 @@ and to the approver. The model can propose a recipient; it can never reach one.
 Each declares its owner, data scope, tool surface and autonomy level in the
 catalog (`src/freight_fleet/catalog/registry.py`). An agent not in the catalog is
 not in the fleet.
+
+**There is no agent editor in the UI, on purpose.** The Fleet page renders the
+catalog; it cannot change it. Which agents exist, what each may touch and what
+stops it is a reviewable diff with tests behind it (an unknown tool blocks;
+verdicts only tighten), not a settings screen anyone signed in can flip. Adding
+a desk is a pull request.
 
 ---
 
@@ -216,8 +222,7 @@ runs it — the scoreboard grades the canonical markdown, which does not move.
 
 The chat surface is one page, `/chat`, in front of ADK's API — a judge can ask
 the fleet something rather than only reading what it already did, watch it hand
-work to a desk, and see a draft stop at the gate. ADK's own developer UI stays
-reachable at `/dev-ui/` as a raw trace view.
+work to a desk, and see a draft stop at the gate.
 
 **Live:** <https://freight-ops-fleet-d5eomsog5a-ew.a.run.app/chat> — behind the
 same login as everything else.
@@ -249,7 +254,10 @@ the panel is what makes the spend visible.)
 **Every turn shows its work.** Folded under each answer is a **Trace** — who
 did what, in order: every tool call with a digest of its arguments, what came
 back, what was held, what errored — alongside route, HELD and BLOCKED cards as
-they happen.
+they happen. And **every answer ends with its evidence**: the documents the
+fleet actually read to produce it, each linked to the console's document viewer
+— or, when nothing was read, a line saying so, so a recall or a routing reply is
+never mistaken for a finding.
 
 Ask about a *named* shipment or folder, as the table does. A question that would
 need every shipment cross-checked ("which one has the most discrepancies?") is

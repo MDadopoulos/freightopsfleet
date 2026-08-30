@@ -739,12 +739,10 @@ def _shell(title: str, body: str, *, active: str = "", pending: int = 0,
     """
     nav = nav_html(active, pending, stranded)
     foot = (
-        '<div class="foot"><p>This console reads records. It never calls a model, and it ships '
-        "zero lines of JavaScript. The fleet runs in Ask the fleet, from the CLI and in the scheduled "
-        'sweep (<code>python -m freight_fleet.cli sweep</code>). The only writes it can cause are gated '
-        "replays through <code>before_tool_gate</code>, and every one of those lands in the ledger "
-        'you are reading.</p><p class="meta"><a href="/privacy">Privacy</a> · every shipment, party '
-        "and figure on these pages is fictional.</p></div>"
+        '<div class="foot"><p class="meta">Every decision made here — approve, reject, send — goes '
+        "through the same gate the agents hit and lands in the ledger. "
+        '<a href="/privacy">Privacy</a> · every shipment, party and figure on these pages is fictional.'
+        "</p></div>"
     )
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -1608,9 +1606,8 @@ def _recovery_block(entry: LedgerEntry, shipment: str, path: str) -> str:
         "<p><strong>To close this row in the record</strong> without executing anything — one "
         "appended ledger row, nothing written to the workspace, now or ever:</p>"
         f'<p class="mono">python -m freight_fleet.cli approvals abandon {esc(entry.entry_id)}</p>'
-        '<p class="meta">Both commands are the CLI, not this page. The console\'s only write path '
-        "is a gated replay through <code>before_tool_gate</code>, and retiring a hold the store "
-        "already lost is not one.</p></div>"
+        '<p class="meta">Both commands are the CLI, not this page: this desk can only approve or reject '
+        "what is still in the queue, and this hold no longer is.</p></div>"
     )
 
 
@@ -1783,8 +1780,8 @@ def decision(approval_id: str) -> HTMLResponse:
                if hold.tool == "send_email" else
                '<button class="btn outline" type="submit">Reject — write nothing</button></form>')
             +
-            '<p class="meta">The button is the confirmation. Approving replays the call through '
-            "before_tool_gate; if the gate refuses, nothing runs.</p></div>"
+            '<p class="meta">The button is the confirmation. Approving runs this one action through the '
+            "same gate that held it; if the gate refuses, nothing runs.</p></div>"
         )
 
     flag = ""

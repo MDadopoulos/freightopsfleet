@@ -331,14 +331,12 @@ def page(identity: str = "") -> str:
         '<p class="foot" id="upstatus">A PDF or a scan, up to 6 MB. It is read by the model into markdown and '
         "lands in the fleet's inbox, where the agents can read it.</p>"
         '<span class="label">This visit</span><div class="usage" id="usage"></div>'
-        '<p class="foot">Conversations are yours alone and survive a reload — they live in a database, not this tab. '
-        '<a href="/dev-ui/">ADK\'s own trace viewer</a> has the raw events.</p></aside>'
+        '<p class="foot">Conversations are yours alone and survive a reload.</p></aside>'
         '<section class="chat"><div class="log" id="log"></div>'
         '<div class="compose"><textarea id="box" placeholder="Ask about a named shipment, e.g. “Is shp-001-pristine clean?”"></textarea>'
         '<button class="send" id="send" type="button">Ask</button></div>'
         '<p class="foot">Every shipment here is fictional. A hold raised here is the same hold the '
-        '<a href="/desk">desk</a> approves or rejects. This page is the one place the project runs JavaScript, inlined and '
-        "framework-free.</p></section></div>"
+        '<a href="/desk">desk</a> approves or rejects.</p></section></div>"
         f'<script type="application/json" id="starters">{json.dumps(STARTERS)}</script>'
         f"<script>{_JS}</script></body></html>"
     )
