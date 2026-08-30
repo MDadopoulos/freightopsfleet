@@ -336,7 +336,7 @@ def page(identity: str = "") -> str:
         '<div class="compose"><textarea id="box" placeholder="Ask about a named shipment, e.g. “Is shp-001-pristine clean?”"></textarea>'
         '<button class="send" id="send" type="button">Ask</button></div>'
         '<p class="foot">Every shipment here is fictional. A hold raised here is the same hold the '
-        '<a href="/desk">desk</a> approves or rejects.</p></section></div>"
+        '<a href="/desk">desk</a> approves or rejects.</p></section></div>'
         f'<script type="application/json" id="starters">{json.dumps(STARTERS)}</script>'
         f"<script>{_JS}</script></body></html>"
     )
