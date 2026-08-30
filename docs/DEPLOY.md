@@ -635,12 +635,15 @@ The environment variables, since there are a lot of them:
 | `FREIGHT_REPO_URL` | the "Source" link on the homepage |
 | `FREIGHT_GOOGLE_REDIRECT_URI` | the OAuth callback — §4.4 |
 
-Two more the deployment may set later: `FREIGHT_PRICE_IN_PER_M` and
-`FREIGHT_PRICE_OUT_PER_M`, USD per million tokens. With both set, the chat page
-turns its token counter into a dollar estimate at *your* rates; with either
-unset it shows tokens only and says so. The page never invents a price, which is
-why this is an env var and not a constant — a hardcoded price would be wrong the
-week after it was written.
+Two more, set on the live service with `--update-env-vars` (no rebuild):
+`FREIGHT_PRICE_IN_PER_M=0.75` and `FREIGHT_PRICE_OUT_PER_M=3.75`, USD per
+million tokens — Gemini 3.7 Flash's introductory Vertex AI rates, valid through
+2026-12-31 (the standard rates from 2027-01-01 are 1.50 / 7.50). With both set,
+the chat page turns its token counter into a dollar estimate at *your* rates;
+with either unset it shows tokens only and says so. The page never invents a
+price, which is why this is an env var and not a constant — a hardcoded price
+would be wrong the week after it was written, and this one is wrong on New
+Year's Day.
 
 ### 4.4 The login — who is allowed to spend the fleet's money
 

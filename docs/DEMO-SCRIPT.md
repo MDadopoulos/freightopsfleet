@@ -87,6 +87,17 @@ Click **Sent** in the nav.
 > "And here's what actually left: the subject, the address it was drafted for,
 > where it really went, and who approved it. Me."
 
+**Optional, +10 s, only if SMTP is switched on (DEPLOY.md §4.5):** switch to a
+browser tab already open on the **freightops.demo@gmail.com inbox** and refresh.
+The same message is sitting there — subject prefixed `[Freight Ops demo]`, and
+the first line of the body naming the address it was drafted for and *not*
+delivered to. Say one sentence:
+
+> "It really left — to the operator's mailbox, and only there."
+
+If you signed in with Google, your own inbox has the copy; showing that instead
+is fine, but the demo mailbox is the safer shot (nothing personal on screen).
+
 ## 1:35–2:05 — Ask the fleet
 
 Click **Ask the fleet**. Click the starter *"Which shipment is missing a
