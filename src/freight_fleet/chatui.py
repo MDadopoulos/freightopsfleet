@@ -53,6 +53,8 @@ html,body{height:100%}body{display:flex;flex-direction:column}
 .side button,.side a.sess{display:block;width:100%;text-align:left;border:1px solid var(--line);background:var(--bg);color:var(--ink);
 border-radius:8px;padding:8px 10px;margin:0 0 6px;font:500 13.5px/1.35 var(--sans);cursor:pointer;text-decoration:none;box-sizing:border-box}
 .side a.sess.current{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+.side a.sess{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.side a.sess .x{color:var(--ink-3);font:700 16px/1 var(--sans);padding:0 4px;border-radius:6px}.side a.sess .x:hover{color:var(--blocked);background:var(--blocked-tint)}
 .side button.new{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:700}
 .side input[type=file]{width:100%;font:13px var(--sans);margin:0 0 6px}
 .side .who{font:600 13.5px/1.35 var(--sans);color:var(--ink-2);margin:0 0 6px;overflow-wrap:anywhere}
@@ -146,6 +148,9 @@ async function listSessions() {
     const when = s.lastUpdateTime ? new Date(s.lastUpdateTime * 1000).toLocaleString() : '';
     a.textContent = (s.id === sessionId ? '● ' : '') + when;
     a.onclick = (e) => { e.preventDefault(); open(s.id); };
+    const x = el('span', 'x', '×'); x.title = 'Delete this conversation';
+    x.onclick = (e) => { e.preventDefault(); e.stopPropagation(); remove(s.id); };
+    a.appendChild(x);
     sessBox.appendChild(a);
   });
   if (!all.length) sessBox.appendChild(el('div', 'foot', 'No conversations yet.'));
@@ -203,6 +208,13 @@ async function open(id) {
   const s = await r.json();
   (s.events || []).forEach(ev => renderEvent(ev, false));
   if (!(s.events || []).length) welcome();
+  listSessions();
+}
+
+async function remove(id) {
+  if (!confirm('Delete this conversation? This cannot be undone.')) return;
+  await api(base() + '/' + encodeURIComponent(id), { method: 'DELETE' });
+  if (sessionId === id) { sessionId = null; log.innerHTML = ''; trace = null; welcome(); }
   listSessions();
 }
 
@@ -284,10 +296,10 @@ async function upload() {
 
 send.onclick = ask;
 box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); } });
-document.getElementById('new').onclick = fresh;
+document.getElementById('new').onclick = () => { sessionId = null; log.innerHTML = ''; trace = null; welcome(); listSessions(); };
 document.getElementById('up').onclick = upload;
 renderUsage();
-(async () => { try { await listSessions(); const h = location.hash.slice(1); if (h) await open(h); else await fresh(); } catch (e) { if (e.message !== 'login') card('err', esc(e.message)); } })();
+(async () => { try { await listSessions(); const h = location.hash.slice(1); if (h) await open(h); else welcome(); } catch (e) { if (e.message !== 'login') card('err', esc(e.message)); } })();
 """
 
 
