@@ -714,7 +714,7 @@ def nav_html(active: str = "", pending: int = 0, stranded: int = 0) -> str:
         + link("/ledger", "Ledger", "ledger")
         + link("/sent", "Sent", "sent")
         + link("/fleet", "Fleet", "fleet")
-        + link("/evidence", "Evidence", "evidence")
+        + link("/evidence", "Scoreboard", "evidence")
     )
     chat = _chat_url()
     if chat:

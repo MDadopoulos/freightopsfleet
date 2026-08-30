@@ -20,9 +20,12 @@ COPY pyproject.toml README.md ./
 COPY src/ ./src/
 RUN pip install --no-cache-dir .
 
-# Content the fleet reads. eval/ is NOT copied - the answer keys stay out of
-# the image entirely, so a deployed agent cannot recite them even in principle.
+# Content the fleet reads. eval/answer_keys/ is NOT copied - the keys stay out
+# of the image entirely, so a deployed agent cannot recite them even in
+# principle. eval/runs/ (the committed, already-graded run records) IS copied,
+# outside the workspace jail, so the scoreboard renders in the deployment.
 COPY fixtures/ ./fixtures/
+COPY eval/runs/ ./eval/runs/
 COPY deploy/agents/ ./agents/
 
 # Seed the workspace at build time: the sweep iterates workspace/shipments/ on

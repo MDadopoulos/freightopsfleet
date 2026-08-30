@@ -582,8 +582,10 @@ the secrets first, or drop them from the flag and add them afterwards with
 What the flags are doing:
 
 - **`--source .`** builds with Cloud Build using the repo's `Dockerfile`. No
-  local Docker needed. `.dockerignore` keeps `eval/` — the answer keys — out of
-  the build context entirely.
+  local Docker needed. `.dockerignore` keeps `eval/answer_keys/` — the answer
+  keys — out of the build context entirely; only `eval/runs/`, the committed
+  and already-graded run records, is copied in so the Scoreboard page renders
+  (it lives outside the workspace jail, where no agent tool can reach it).
 - **`--command sh --args='-c,uvicorn …'`** is the image's own default, stated
   explicitly so a `describe` shows what runs. See the note at the top of this
   document about the `=`.

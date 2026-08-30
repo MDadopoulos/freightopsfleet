@@ -2,6 +2,7 @@
 # re-listed here as well as in the COPY set, because a leak here would make
 # every score meaningless and the cost of saying it twice is zero.
 eval/
+!eval/runs/
 .venv/
 .git/
 audit/

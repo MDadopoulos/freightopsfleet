@@ -70,6 +70,7 @@ font:500 13.5px/1.3 var(--sans);cursor:pointer;text-align:left;max-width:100%}
 .msg.user{align-self:flex-end;background:var(--accent);color:var(--accent-ink)}
 .msg.bot{align-self:flex-start;background:var(--surface);border:1px solid var(--line)}
 .msg.bot.thinking{color:var(--ink-3);font-style:italic}
+.ev{margin:10px -16px -12px;padding:8px 16px;border-top:1px solid var(--line);font:500 12.5px/1.5 var(--sans);color:var(--ink-3);white-space:normal}.ev b{color:var(--ink-2)}.ev a{font-family:var(--mono);font-size:12px}
 .card{align-self:flex-start;max-width:78ch;border-radius:10px;padding:10px 14px;font:500 13.5px/1.45 var(--sans);border-left:5px solid currentColor;background:var(--surface)}
 .card.route{color:var(--ink-3);background:var(--sunk)}
 .card.held{color:var(--held);background-color:var(--held-tint)}.card.held b{color:var(--ink)}
@@ -95,6 +96,7 @@ const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.classN
 const log = document.getElementById('log'), box = document.getElementById('box'), send = document.getElementById('send');
 const sessBox = document.getElementById('sessions'), usageBox = document.getElementById('usage');
 let sessionId = null, busy = false;
+let reads = [];  // documents the fleet read during the current turn
 const usage = { turns: 0, inTok: 0, outTok: 0 };
 
 function md(text) {
@@ -168,6 +170,7 @@ function renderEvent(ev, live) {
     if (p.functionCall) {
       const fc = p.functionCall; const d = digest(fc.args);
       traceRow(ev, 'call ' + fc.name + (d ? ' (' + d + ')' : ''));
+      if (fc.name === 'read_file' && fc.args && fc.args.path && !reads.includes(fc.args.path)) reads.push(fc.args.path);
       if (live) card('route', '→ <b>' + esc(ev.author || 'fleet') + '</b> calls <span class="mono">' + esc(fc.name) + '</span>' + (d ? ' <span class="mono">' + esc(d) + '</span>' : ''));
     } else if (p.functionResponse) {
       const resp = p.functionResponse.response || {};
@@ -223,7 +226,7 @@ async function ask() {
   busy = true; send.disabled = true; box.value = '';
   bubble('user', text);
   const think = bubble('bot thinking', 'The fleet is working — a cross-check reads three documents and can take a minute…');
-  let bot = null, acc = ''; newTrace(); usage.turns += 1; renderUsage();
+  let bot = null, acc = ''; newTrace(); usage.turns += 1; renderUsage(); reads = [];
   try {
     const r = await api('/run_sse', { method: 'POST', body: JSON.stringify({ app_name: APP, user_id: 'me', session_id: sessionId, new_message: { role: 'user', parts: [{ text }] }, streaming: true }) });
     const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
@@ -250,8 +253,16 @@ async function ask() {
       }
     }
     if (!bot) { think.remove(); card('route', 'The fleet finished without a reply to show. Try one of the starters.'); }
+    if (bot) evidence(bot);
   } catch (e) { think.remove(); if (e.message !== 'login') card('err', 'Request failed: ' + esc(e.message)); }
   busy = false; send.disabled = false; box.focus(); listSessions();
+}
+
+function evidence(bot) {
+  const e = el('div', 'ev');
+  if (!reads.length) { e.innerHTML = '<b>Evidence:</b> no document was read for this answer — treat it as routing or recall, not a finding.'; }
+  else e.innerHTML = '<b>Evidence — ' + reads.length + ' document' + (reads.length === 1 ? '' : 's') + ' read:</b> ' + reads.map(p => '<a href="/doc?path=' + encodeURIComponent(p) + '">' + esc(p) + '</a>').join(' · ');
+  bot.appendChild(e);
 }
 
 async function upload() {

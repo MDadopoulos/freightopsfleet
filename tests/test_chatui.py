@@ -25,6 +25,8 @@ def test_the_page_is_self_contained_and_wears_the_console_nav(monkeypatch, tmp_p
     assert "/run_sse" in html and "/users/me/sessions" in html
     # the upload control and the usage panel are on the page; prices are opt-in
     assert 'id="file"' in html and "/upload" in html and 'id="usage"' in html
+    # every answer ends with the documents it was read from, linked to the console's viewer
+    assert "Evidence — " in html and "/doc?path=" in html and "Scoreboard" in html
     assert 'data-prices=""' in html
     monkeypatch.setenv("FREIGHT_PRICE_IN_PER_M", "0.30")
     monkeypatch.setenv("FREIGHT_PRICE_OUT_PER_M", "2.50")
