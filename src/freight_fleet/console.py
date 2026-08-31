@@ -51,10 +51,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import quote
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 from .catalog.registry import FLEET
@@ -352,6 +352,59 @@ def derive_cleared(entries: list[LedgerEntry], session: str) -> list[str]:
     return [s for s in touched if s not in flagged]
 
 
+#: A citation line in a draft: `- "exact text as printed" — document.md`.
+#: Straight or curly quotes, hyphen or dash — models vary, the shape does not.
+_SOURCE_RX = re.compile(r'^\s*[-*]\s*["“](.+?)["”]\s*[—–-]+\s*(\S+?)\s*$')
+
+
+@dataclass(frozen=True)
+class CitedQuote:
+    """D8 — one citation the draft makes, checked against the file it names.
+
+    `found` is a byte-for-byte substring check, nothing cleverer: the prompt
+    demands the quote verbatim precisely so that verification can be mechanical.
+    The model proposes the citation; this type records whether the file agrees.
+    """
+
+    text: str
+    doc: str      # the document name the draft wrote
+    path: str     # the evidence path it resolved to, "" when none matched
+    found: bool
+
+
+def derive_sources(draft: str) -> list[tuple[str, str]]:
+    """The citation lines of a draft, in order, deduped — parsing only.
+
+    Anything that does not match the shape is simply not a citation; there is
+    no fuzzy rescue, because a citation that needs interpreting cannot be
+    verified mechanically and would come back as a "not found" flag anyway.
+    """
+    out: list[tuple[str, str]] = []
+    for line in (draft or "").splitlines():
+        m = _SOURCE_RX.match(line)
+        if m and (m.group(1), m.group(2)) not in out:
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
+def verify_sources(draft: str, evidence: list[str]) -> list[CitedQuote]:
+    """D8 — every citation in the draft, verified against the documents this
+    session actually read. Resolution is by document NAME against the evidence
+    list (the draft says `waybill.md`, the ledger knows which one), and the
+    read goes through the tools' own jail. A doc name that matches nothing the
+    session read is a finding about the draft, reported as unfound."""
+    contents: dict[str, str] = {}
+    out: list[CitedQuote] = []
+    for text, doc in derive_sources(draft):
+        path = next((p for p in evidence if Path(p).name == doc), "")
+        if path and path not in contents:
+            result = workspace.read_file(path)
+            contents[path] = (str(result.get("content", ""))
+                              if result.get("status") == "ok" else "")
+        out.append(CitedQuote(text, doc, path, bool(path) and text in contents[path]))
+    return out
+
+
 def session_kind(session_id: str) -> str:
     """D6 — who was at the keyboard, if anyone."""
     if session_id.startswith("sweep"):
@@ -563,6 +616,8 @@ td.mono,th.mono{font-family:var(--mono)}
 .draft h2,.draft h3,.draft h4{font-size:19px;margin:20px 0 8px}
 .draft table{margin:12px 0}
 .draft pre{background:var(--sunk);padding:12px;border-radius:8px;overflow-x:auto}
+mark{background:var(--held-tint);color:var(--ink);padding:0 3px;border-radius:3px;
+     box-shadow:inset 0 0 0 1px var(--held)}
 details.raw{margin:12px 0 0;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
 details.raw>summary{cursor:pointer;padding:16px 20px;min-height:44px;display:flex;align-items:center;
      font:500 15px/1.5 var(--mono);flex-wrap:wrap;gap:8px}
@@ -843,6 +898,34 @@ def md_lite(text: str) -> str:
     return "".join(out)
 
 
+def _mark(rendered: str, terms: list[str]) -> str:
+    """Wrap every occurrence of each term in `<mark>` — TEXT NODES ONLY.
+
+    Runs on already-rendered HTML, so the match target is the ESCAPED form of
+    each term and the walk skips anything between `<` and `>`: a term can never
+    splice into a tag, and the only markup this inserts is the literal pair of
+    mark tags. Longest term first, one combined pass — so one term can never
+    re-match inside another's freshly inserted tags.
+    """
+    if not terms:
+        return rendered
+    rx = re.compile("|".join(
+        re.escape(esc(t)) for t in sorted(set(terms), key=len, reverse=True)))
+    out: list[str] = []
+    i = 0
+    while i < len(rendered):
+        if rendered[i] == "<":
+            j = rendered.find(">", i)
+            j = len(rendered) if j == -1 else j + 1
+            out.append(rendered[i:j])
+        else:
+            j = rendered.find("<", i)
+            j = len(rendered) if j == -1 else j
+            out.append(rx.sub(lambda m: f"<mark>{m.group(0)}</mark>", rendered[i:j]))
+        i = j
+    return "".join(out)
+
+
 # --- state rendering ---------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -1038,6 +1121,11 @@ DERIVATIONS = [
         "approved / rejected / executed / abandoned; otherwise LAPSED — in the record, absent "
         "from the store, therefore never executable, and never recoverable: the draft lived only "
         "in the store. `approvals reconcile` calls this same condition <em>stranded</em>.")),
+    ("D8 cited figures", (
+        "Draft lines of the shape `- &quot;exact text&quot; — document.md` are its citations. "
+        "Each is checked byte-for-byte against the named document among the ones this session "
+        "read (D2). Only a verbatim match is marked in the viewer; a quote the console cannot "
+        "find is flagged on the decision, never repaired or invented.")),
 ]
 
 
@@ -1045,7 +1133,7 @@ def derivations_block() -> str:
     items = "".join(f"<li><strong>{name}</strong> — {rule}</li>" for name, rule in DERIVATIONS)
     return (
         '<details class="raw" id="derivations"><summary>Where every derived number comes from '
-        "(7 rules)</summary><div>"
+        f"({len(DERIVATIONS)} rules)</summary><div>"
         "<p class=\"lede\">Values on this page are either <strong>recorded</strong> — straight from "
         "the ledger, the approval store, the catalog or a run file, rendered plain — or "
         "<strong>derived</strong> by one of these rules, and shown with a dotted underline.</p>"
@@ -1731,16 +1819,48 @@ def decision(approval_id: str) -> HTMLResponse:
     )
 
     if hold.evidence:
+        # D8: the draft's own citations, verified byte-for-byte. A verified
+        # quote rides its document's link as ?hl= so the viewer opens with the
+        # figure already marked; an unverified one is flagged, never repaired.
+        cited = verify_sources(hold.draft, hold.evidence)
+        by_path: dict[str, list[CitedQuote]] = {}
+        for q in cited:
+            if q.found:
+                by_path.setdefault(q.path, []).append(q)
+
+        def _doc_href(p: str) -> str:
+            terms = "".join(f"&hl={quote(q.text)}" for q in by_path.get(p, []))
+            return f"/doc?path={quote(p)}{terms}"
+
         links = "".join(
-            f'<li><a class="mono" href="/doc?path={quote(p)}">{esc(p)}</a> '
-            f'<span class="meta">{esc(Path(p).suffix.lstrip(".") or "file")}</span></li>'
+            f'<li><a class="mono" href="{_doc_href(p)}">{esc(p)}</a> '
+            f'<span class="meta">{esc(Path(p).suffix.lstrip(".") or "file")}</span>'
+            + "".join(
+                f'<div class="meta">cites <a href="/doc?path={quote(p)}&hl={quote(q.text)}">'
+                f"“{esc(q.text)}”</a> — found verbatim in the file</div>"
+                for q in by_path.get(p, []))
+            + "</li>"
             for p in hold.evidence
         )
+        broken = [q for q in cited if not q.found]
+        warn = ""
+        if broken:
+            rows = "".join(
+                f'<p class="mono" style="margin:4px 0">“{esc(q.text)}” — {esc(q.doc)}'
+                f'{"" if q.path else " (not among the documents this session read)"}</p>'
+                for q in broken)
+            warn = (
+                f'<p style="color:var(--blocked)"><strong>{len(broken)} citation'
+                f'{"s" if len(broken) != 1 else ""} the console could not find verbatim</strong> '
+                "in the named document. Check by eye before approving — a quote that does not "
+                f"match its source is itself a defect in the notice.</p>{rows}")
+        checked = ("the figures it cites are verified against the file and arrive marked (D8)"
+                   if by_path else "check the figure the notice quotes")
         evidence = (
             f"<h2>What the agent read before drafting this</h2>"
             f'<p class="lede">Shipment {_derived(hold.shipment or "unattributed")} · '
-            f"{len(hold.evidence)} documents. Open one and check the figure the notice quotes.</p>"
-            f"<ul>{links}</ul>"
+            f"{len(hold.evidence)} documents. Open one — {checked}.</p>"
+            f"<ul>{links}</ul>{warn}"
         )
     else:
         evidence = ('<h2>What the agent read before drafting this</h2>'
@@ -2573,8 +2693,22 @@ def _csv_table(text: str) -> str:
     return f'<div class="scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
+def _found_terms(text: str, hl: list[str]) -> list[str]:
+    """Only `?hl=` terms that occur verbatim in the document survive.
+
+    An unmatched term is dropped, never echoed: the page must not reflect
+    arbitrary query text, and a highlight that is not in the file would be the
+    console asserting a citation the document does not carry.
+    """
+    seen: list[str] = []
+    for t in hl[:16]:
+        if t and len(t) <= 300 and t in text and t not in seen:
+            seen.append(t)
+    return seen
+
+
 @app.get("/doc", response_class=HTMLResponse)
-def doc(path: str = "") -> HTMLResponse:
+def doc(path: str = "", hl: Annotated[list[str] | None, Query()] = None) -> HTMLResponse:
     """One source document, reachable only from a decision's evidence list.
 
     Three guards, all required: the tools' own path jail, an extension
@@ -2626,6 +2760,7 @@ def doc(path: str = "") -> HTMLResponse:
                                     pending=len(pending), stranded=stranded_count(entries)))
 
     text = str(result.get("content", ""))
+    terms = _found_terms(text, hl or [])
     suffix = Path(path).suffix
     if suffix == ".csv":
         rendered = _csv_table(text)
@@ -2634,13 +2769,17 @@ def doc(path: str = "") -> HTMLResponse:
     else:
         rendered = f'<pre class="mono" style="white-space:pre-wrap">{esc(text)}</pre>'
 
+    marked = (f'<p class="meta">{len(terms)} cited passage{"s" if len(terms) != 1 else ""} '
+              "marked below — a verbatim match of the notice's own citation against this "
+              "file (D8), not a model claim.</p>" if terms else "")
     body = (
         f"<h1>{esc(Path(path).name)}</h1>"
         f'<p class="mono">{esc(path)} · {_num(len(text.encode("utf-8")))} bytes</p>'
         f'<p class="meta">{provenance}</p>'
-        f"{rendered}"
+        f"{marked}"
+        f"{_mark(rendered, terms)}"
         '<details class="raw"><summary>Raw text</summary>'
-        f'<div><pre>{esc(text)}</pre></div></details>'
+        f"<div><pre>{_mark(esc(text), terms)}</pre></div></details>"
         '<p style="margin-top:24px"><a href="/desk">← Back to the desk</a></p>'
     )
     return HTMLResponse(_shell(Path(path).name, body, pending=len(pending), stranded=stranded_count(entries)))

@@ -58,3 +58,13 @@ def test_devui_mounts_chat_when_the_app_is_fastapi(monkeypatch):
     app = devui.create_app()
     r = TestClient(app).get("/chat")
     assert r.status_code == 200 and "Ask the fleet" in r.text
+
+
+def test_the_evidence_links_carry_the_answers_citations(monkeypatch):
+    """The chat page parses the answer's own `- "..." — doc` lines and rides
+    them onto the /doc links as ?hl=; the server verifies each byte-for-byte,
+    so the page never asserts a match itself."""
+    html = chatui.page()
+    assert "function citations(" in html
+    assert "'&hl=' + encodeURIComponent" in html
+    assert "evidence(bot, acc)" in html

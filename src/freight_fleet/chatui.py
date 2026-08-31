@@ -265,15 +265,34 @@ async function ask() {
       }
     }
     if (!bot) { think.remove(); card('route', 'The fleet finished without a reply to show. Try one of the starters.'); }
-    if (bot) evidence(bot);
+    if (bot) evidence(bot, acc);
   } catch (e) { think.remove(); if (e.message !== 'login') card('err', 'Request failed: ' + esc(e.message)); }
   busy = false; send.disabled = false; box.focus(); listSessions();
 }
 
-function evidence(bot) {
+function citations(text) {
+  // The answer's own `- "exact text" — document.md` lines, keyed by document
+  // name. They ride the evidence links as ?hl=; the doc viewer verifies each
+  // one byte-for-byte server-side, so a quote the file does not carry is
+  // dropped there, never highlighted.
+  const map = {};
+  const rx = /^\s*[-*]\s*["“](.+?)["”]\s*[—–-]+\s*(\S+?)\s*$/gm;
+  let m; while ((m = rx.exec(text || ''))) { (map[m[2]] = map[m[2]] || []).push(m[1]); }
+  return map;
+}
+
+function evidence(bot, text) {
   const e = el('div', 'ev');
   if (!reads.length) { e.innerHTML = '<b>Evidence:</b> no document was read for this answer — treat it as routing or recall, not a finding.'; }
-  else e.innerHTML = '<b>Evidence — ' + reads.length + ' document' + (reads.length === 1 ? '' : 's') + ' read:</b> ' + reads.map(p => '<a href="/doc?path=' + encodeURIComponent(p) + '">' + esc(p) + '</a>').join(' · ');
+  else {
+    const cites = citations(text);
+    let marked = false;
+    e.innerHTML = '<b>Evidence — ' + reads.length + ' document' + (reads.length === 1 ? '' : 's') + ' read:</b> ' + reads.map(p => {
+      const q = cites[p.split('/').pop()] || [];
+      if (q.length) marked = true;
+      return '<a href="/doc?path=' + encodeURIComponent(p) + q.map(t => '&hl=' + encodeURIComponent(t)).join('') + '">' + esc(p) + '</a>';
+    }).join(' · ') + (marked ? ' — quoted figures arrive marked in the document.' : '');
+  }
   bot.appendChild(e);
 }
 

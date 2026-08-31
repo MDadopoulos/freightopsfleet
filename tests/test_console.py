@@ -746,3 +746,114 @@ def test_a_failed_attempt_with_a_full_score_is_the_worst():
     row = console.collapse_attempts(record)[0]
     assert row["passed"] is False
     assert row["worst"]["details"] == "matched all, count wrong"
+
+
+# --- D8: the draft's citations, verified against the documents ----------------
+#
+# The model proposes a citation; the console checks it byte-for-byte against
+# the file the session read. Only a verbatim match is marked in the viewer, a
+# miss is flagged on the decision, and an arbitrary ?hl= is never echoed.
+
+CITING_DRAFT = """# Discrepancy notice — SHP-T01
+
+The waybill and the packing list disagree on gross weight.
+
+Sources:
+- "Gross weight: 6,098.0 kg" — waybill.md
+- “carton,weight_kg” — packing_list.csv
+- "Gross weight: 9,999.9 kg" — waybill.md
+- "anything at all" — invoice.md
+
+Please confirm the corrected figure by Thursday 17:00.
+"""
+
+
+@pytest.fixture()
+def citing_hold(world):
+    """A second hold whose draft cites its sources — through the real gate, so
+    the citations verify against the same evidence rows production writes."""
+    from freight_fleet.governance.gate import FileApprovalStore, make_before_tool_gate
+
+    store = FileApprovalStore(world.tmp / "approvals.json")
+    gate = make_before_tool_gate(world.ledger, store, "sweep-2026-08-21")
+    held = gate(_Tool("write_file"),
+                {"path": "outbox/shp-t01-citing-notice.md", "content": CITING_DRAFT}, _Ctx())
+    return held["approval_id"]
+
+
+def test_sources_parse_and_verify_byte_for_byte(world):
+    evidence = ["shipments/shp-t01/waybill.md", "shipments/shp-t01/packing_list.csv"]
+
+    cited = console.verify_sources(CITING_DRAFT, evidence)
+
+    assert [(q.text, q.doc, q.found) for q in cited] == [
+        ("Gross weight: 6,098.0 kg", "waybill.md", True),
+        ("carton,weight_kg", "packing_list.csv", True),
+        ("Gross weight: 9,999.9 kg", "waybill.md", False),
+        ("anything at all", "invoice.md", False),
+    ]
+    assert cited[3].path == "", "a doc the session never read resolves to nothing"
+
+
+def test_the_decision_marks_verified_quotes_and_flags_the_rest(world, citing_hold):
+    body = world.client.get(f"/decision/{citing_hold}").text
+
+    assert "found verbatim in the file" in body
+    assert "hl=Gross%20weight%3A%206%2C098.0%20kg" in body, \
+        "the verified quote must ride the document link as ?hl="
+    assert "could not find verbatim" in body
+    assert "9,999.9 kg" in body, "the failed citation is shown, not hidden"
+    assert "not among the documents this session read" in body
+    assert "6,098.0 kg</a> — found" not in body.split("could not find verbatim")[1], \
+        "verified and unverified citations must not swap sections"
+
+
+def test_doc_marks_only_what_the_file_carries(world):
+    r = world.client.get("/doc", params={
+        "path": "shipments/shp-t01/waybill.md",
+        "hl": ["Gross weight: 6,098.0 kg", "<script>alert(2)</script>", "not in the file"],
+    })
+
+    assert r.status_code == 200
+    assert "<mark>Gross weight: 6,098.0 kg</mark>" in r.text, "rendered view marked"
+    assert r.text.count("<mark>") >= 2, "the raw fold is marked too"
+    assert r.text.count("<mark>") == r.text.count("</mark>")
+    assert "alert(2)" not in r.text, "an unmatched ?hl= is dropped, never echoed"
+    assert "not in the file" not in r.text
+    assert "1 cited passage marked" in r.text
+
+
+def test_doc_without_highlights_is_unchanged(world):
+    body = world.client.get("/doc", params={"path": "shipments/shp-t01/waybill.md"}).text
+    assert "<mark>" not in body
+    assert "cited passage" not in body
+
+
+def test_a_marked_doc_is_well_formed_html(world):
+    from html.parser import HTMLParser
+
+    void = {"meta", "br", "hr", "link", "img", "input", "source", "col"}
+
+    class _Check(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stack: list[str] = []
+            self.errors: list[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag not in void:
+                self.stack.append(tag)
+
+        def handle_endtag(self, tag):
+            if tag in void:
+                return
+            if not self.stack or self.stack[-1] != tag:
+                self.errors.append(f"</{tag}> does not close <{self.stack[-1:]}>")
+                return
+            self.stack.pop()
+
+    checker = _Check()
+    checker.feed(world.client.get("/doc", params={
+        "path": "shipments/shp-t01/waybill.md", "hl": ["Gross weight: 6,098.0 kg"]}).text)
+    assert checker.errors == []
+    assert checker.stack == []
