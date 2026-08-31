@@ -879,3 +879,48 @@ def test_reconcile_reports_a_decided_action_that_is_still_queued(two_stores):
     assert recon.diverged is True
     assert recon.orphaned == [] and recon.stranded == [] and recon.awaiting == [], \
         "it must be counted apart from the three modes that never caught it"
+
+
+# --- the ledger reads damage as rows, never as exceptions ---------------------
+#
+# One bad byte in an append-only file has no remedy — there is no edit path, by
+# design. So the reader, not each caller, owns tolerance: damage becomes an
+# UNREADABLE row that cannot resolve a hold, and the queue stays decidable.
+
+
+def test_a_damaged_line_reads_as_a_row_never_an_exception(tmp_path):
+    from freight_fleet.governance.ledger import UNREADABLE, LedgerEntry
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(LedgerEntry.new(session_id="s", agent="a", tool="read_file",
+                                  risk="low", verdict="auto", outcome="auto_ran",
+                                  args_digest={"path": "p"}))
+    with (tmp_path / "ledger.jsonl").open("ab") as fh:
+        fh.write(b"{this is not json\n")
+        fh.write(b"\xff\xfe partial write\n")
+        fh.write(b'{"entry_id": "x", "ts": "", "session_id": 7, "agent": "", '
+                 b'"tool": "", "risk": "", "verdict": "", "outcome": "auto_ran", '
+                 b'"args_digest": {}}\n')
+
+    rows = list(ledger.read())
+    assert [r.outcome for r in rows] == ["auto_ran", UNREADABLE, UNREADABLE, UNREADABLE]
+    assert rows[1].detail == "this line could not be parsed as JSON"
+    assert rows[2].detail == "this line is not valid UTF-8"
+    assert "wrong type" in rows[3].detail
+    # A damaged row can never resolve a hold: it carries no approval_id.
+    assert all(r.approval_id is None for r in rows[1:])
+
+
+def test_the_constructor_writes_nothing_the_first_append_does(tmp_path):
+    """Read-only surfaces construct a Ledger on every request just to name the
+    path. The parent directory appears on the first WRITE, not in __init__."""
+    from freight_fleet.governance.ledger import LedgerEntry
+
+    ledger = Ledger(tmp_path / "audit" / "ledger.jsonl")
+    assert not (tmp_path / "audit").exists(), "constructing a Ledger is a read-only act"
+
+    ledger.append(LedgerEntry.new(session_id="s", agent="a", tool="read_file",
+                                  risk="low", verdict="auto", outcome="auto_ran",
+                                  args_digest={}))
+    assert (tmp_path / "audit" / "ledger.jsonl").exists()
+    assert [r.outcome for r in ledger.read()] == ["auto_ran"]

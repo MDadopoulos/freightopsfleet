@@ -23,7 +23,7 @@ decision you make. Everything below sits behind that one login, on one nav.
 
 | Behind the login | What you can do there |
 |---|---|
-| **Desk** — `/desk` | The approval queue. Open a held email: the draft, the contract for what approving it does, and the documents the agent read to write it. **Approve** or **Reject** — the buttons are live, and the ledger row carries your name. |
+| **Desk** — `/desk` | The approval queue. Open a held email: the draft, the contract for what approving it does, and the documents the agent read to write it — with every figure the draft cites verified byte-for-byte against its source and pre-marked in the viewer. **Approve** or **Reject** — the buttons are live, and the ledger row carries your name. |
 | **Ask the fleet** — `/chat` | Ask the agents something, upload a scan, watch the routing and every tool call in the trace. A hold raised here lands on the Desk. |
 | **Sent** — `/sent` | What actually left: the subject, the address the fleet drafted for, where it was really delivered, and who approved it. |
 | **Ledger · Fleet · Scoreboard** | The append-only record; the catalog, where each agent declares its owner, data scope and tool allow-list — read-only by design; and the graded run (7/7) with the documents behind it. |
@@ -257,7 +257,11 @@ back, what was held, what errored — alongside route, HELD and BLOCKED cards as
 they happen. And **every answer ends with its evidence**: the documents the
 fleet actually read to produce it, each linked to the console's document viewer
 — or, when nothing was read, a line saying so, so a recall or a routing reply is
-never mistaken for a finding.
+never mistaken for a finding. When a notice cites its sources
+(`- "Gross weight: 6,098.0 kg" — waybill.md`), the console verifies each quote
+**byte-for-byte against the file** and the viewer opens with the passage
+already marked — a mechanical string match, never the model's own claim; a
+quote the file does not carry is flagged on the decision, not highlighted.
 
 Ask about a *named* shipment or folder, as the table does. A question that would
 need every shipment cross-checked ("which one has the most discrepancies?") is
