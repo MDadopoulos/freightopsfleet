@@ -558,3 +558,191 @@ def test_rejecting_a_send_sends_nothing(world, held_send):
     assert r.status_code == 200 and "REJECTED" in r.text
     assert mail.list_sent() == []
     assert "by judge1" in list(world.ledger.read())[-1].detail
+
+
+# --- damage degrades; it never takes a screen or the queue down ---------------
+#
+# The rows below are hand-written on purpose, against this file's own header:
+# these tests are about lines the real gate did NOT write — a partial write's
+# bad byte, a hand edit, a newer writer's vocabulary. Tolerance for foreign
+# input can only be tested with foreign input.
+
+
+def test_one_bad_byte_never_takes_down_a_screen(world):
+    """UnicodeDecodeError is not OSError. One non-UTF-8 byte in the ledger used
+    to 500 every screen; it must degrade to one UNREADABLE row instead."""
+    with (world.tmp / "ledger.jsonl").open("ab") as fh:
+        fh.write(b"\xff\xfe partial write\n")
+
+    for path in ("/", "/desk", "/ledger", "/ledger.jsonl", "/sent", "/fleet",
+                 "/evidence", "/reconcile.json"):
+        assert world.client.get(path).status_code == 200, path
+    body = world.client.get("/ledger").text
+    assert "UNREADABLE LINE" in body
+    assert "not valid UTF-8" in body
+
+
+def test_a_mistyped_field_is_unreadable_not_a_crash(world):
+    """`"session_id": 123` parses as JSON and builds a LedgerEntry — the
+    dataclass checks key names, not value types — and then crashes the first
+    caller that treats the field as a string. It must render as damage."""
+    row = {"entry_id": "x1", "ts": "", "session_id": 123, "agent": "a",
+           "tool": "read_file", "risk": "low", "verdict": "auto",
+           "outcome": "auto_ran", "args_digest": {"path": "p"}}
+    with (world.tmp / "ledger.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+    assert world.client.get("/desk").status_code == 200
+    body = world.client.get("/ledger").text
+    assert "UNREADABLE LINE" in body
+    assert "wrong type" in body
+
+
+def test_the_queue_stays_decidable_over_a_damaged_ledger(world):
+    """The console renders a damaged line tolerantly; the approve button must
+    survive the same line. A queue whose every decision 500s while one bad byte
+    exists in an append-only file is bricked permanently."""
+    with (world.tmp / "ledger.jsonl").open("ab") as fh:
+        fh.write(b"{this is not json\n")
+        fh.write(b"\xff\xfe not utf-8 either\n")
+
+    response = world.client.post(f"/decision/{world.approval_id}/approve")
+
+    assert response.status_code == 200
+    assert world.target.read_text(encoding="utf-8") == DRAFT
+    outcomes = [e.outcome for e in world.ledger.read()]
+    assert outcomes[-2:] == ["approved", "executed"]
+
+
+def test_an_unknown_outcome_is_not_reported_as_ran(world):
+    """The console and the writers deploy separately. A row from a newer
+    vocabulary must render as visibly unrecognised — the old fallback was the
+    auto_ran state, which asserted RAN about an action nothing here knows."""
+    row = {"entry_id": "fx-1", "ts": "2026-08-21T09:00:00+00:00",
+           "session_id": "sweep-2026-08-21", "agent": "cross_check",
+           "tool": "write_file", "risk": "high", "verdict": "ask",
+           "outcome": "expired", "args_digest": {"path": "outbox/x.md"},
+           "detail": "written by a newer writer"}
+    with (world.tmp / "ledger.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+    body = world.client.get("/ledger").text
+    seg = body.split('id="e-fx-1"')[1][:400]
+    assert "UNRECOGNISED" in seg
+    assert "RAN</span>" not in seg, "an unknown outcome must not wear the RAN pill"
+    assert "expired" in seg, "the writer's own word still reaches the row"
+
+
+def test_the_strip_cells_sum_whatever_the_outcome_mix(world):
+    """'4 decisions' over cells summing to 3 is a false sentence on the audit
+    page. Every outcome present lands in a cell — abandoned included — and the
+    ask-verdict sentence counts rows whose verdict IS ask, not a hardcoded
+    subset that forgets rejected and abandoned."""
+    import re as _re
+
+    from freight_fleet.governance.gate import (
+        FileApprovalStore,
+        abandon_stranded,
+        make_before_tool_gate,
+    )
+
+    # A second hold, made by the real gate, in the real store.
+    store = FileApprovalStore(world.tmp / "approvals.json")
+    gate = make_before_tool_gate(world.ledger, store, "sweep-2026-08-21")
+    held = gate(_Tool("write_file"), {"path": "outbox/second.md", "content": "x"}, _Ctx())
+    # Decide the first hold: a rejected row, verdict ask.
+    world.client.post(f"/decision/{world.approval_id}/reject")
+    # Strand the second the way production does — the store forgot it — and
+    # retire it, which appends the abandoned row the strip used to lose.
+    lost = FileApprovalStore(world.tmp / "lost.json")
+    res = abandon_stranded(held["approval_id"], ledger=world.ledger,
+                           approvals=lost, source="approval-cli")
+    assert res.status == "abandoned"
+
+    body = world.client.get("/ledger").text
+    strip = body.split('<div class="card">')[1]
+    numbers = [int(m) for m in _re.findall(r'<div class="count3">(\d+)</div>', strip)]
+    assert numbers, "the strip must render its cells"
+    assert numbers[0] == sum(numbers[1:]), "the cells must sum to the decisions count"
+    assert "abandoned" in strip
+    assert "2 × held" in body and "1 × rejected" in body and "1 × abandoned" in body
+
+
+def test_a_get_never_writes_the_audit_directory(tmp_path, monkeypatch):
+    """Rendering the record is a read. A console GET that mkdirs the ledger's
+    parent is a write nobody authorized — and a 500 on a read-only deploy."""
+    monkeypatch.setenv("FREIGHT_LEDGER_PATH", str(tmp_path / "audit" / "ledger.jsonl"))
+    monkeypatch.setenv("FREIGHT_APPROVALS_PATH", str(tmp_path / "data" / "approvals.json"))
+    client = TestClient(console.app)
+
+    assert client.get("/desk").status_code == 200
+    assert client.get("/ledger").status_code == 200
+    assert not (tmp_path / "audit").exists()
+
+
+# --- the most-complete-run guard counts tasks, not rows -----------------------
+
+
+def test_a_hero_tier_repeat_cannot_take_the_headline(world):
+    """`--tier hero --repeat 3` writes six ROWS for two TASKS. Six rows used to
+    satisfy the most-complete-run guard, so the newest hero re-run took the
+    page over as `2 / 2` — the exact cherry-pick the threshold exists to
+    block — and entered the history bar as if comparable."""
+    results = [
+        {"id": task, "attempt": attempt, "passed": True, "score": 1.0,
+         "details": "hero re-run", "final_text": "x"}
+        for task in ("g1_hero_crosscheck", "g9_governance_hold")
+        for attempt in (1, 2, 3)
+    ]
+    _write_run(world, {"model": "gemini-3.7-flash", "ts": "20260821T230000Z",
+                       "results": results}, name="20260821T230000Z.json")
+
+    body = world.client.get("/evidence").text
+    assert ">6 / 6<" in body, "the full record must keep the headline"
+    assert ">2 / 2<" not in body, "the hero re-run must not reach the page"
+
+
+def test_an_interrupted_repeat_does_not_claim_uniform_attempts(world):
+    """run_eval persists after every attempt so an interrupted --repeat is
+    still evidence. 'Every task was run N times' over such a record is untrue;
+    the page must say 'up to'."""
+    record = _repeat_record(repeat=1)
+    record["results"].append({"id": "g1_hero_crosscheck", "attempt": 2, "passed": True,
+                              "score": 1.0, "details": "clean control correct",
+                              "final_text": "x"})
+    _write_run(world, record)
+
+    body = world.client.get("/evidence").text
+    assert "Tasks were run up to" in body
+    assert "Every task was run" not in body
+
+
+def test_an_ungraded_clean_control_is_not_a_fail(world):
+    """A g2 row with no gradable attempt renders EYE-REVIEWED in the table; the
+    centrepiece card must not read FAIL over the same row."""
+    results = [{"id": t, "passed": True, "score": 1.0, "details": "ok", "final_text": "x"}
+               for t in ("g1_hero_crosscheck", "g3_container_refs", "g4_quote_vs_invoice",
+                         "g5_air_dangerous_goods", "g6_missing_document")]
+    results.append({"id": "g2_clean_control", "status": "not_wired"})
+    _write_run(world, {"model": "gemini-3.7-flash", "ts": "20260821T230000Z",
+                       "results": results}, name="20260821T230000Z.json")
+
+    body = world.client.get("/evidence").text
+    card = body[body.index("The number to look at first"):]
+    card = card[:card.index("Every task in the run")]
+    assert "FAIL" not in card
+    assert "not mechanically graded" in card
+
+
+def test_a_failed_attempt_with_a_full_score_is_the_worst():
+    """The grader can emit passed=False with score 1.0 (every finding matched,
+    the reported count did not). Min-by-score alone kept the passing attempt on
+    a tie, so a FAIL row showed a passing answer as its details."""
+    record = {"results": [
+        {"id": "t", "passed": True, "score": 1.0, "details": "good", "final_text": "good answer"},
+        {"id": "t", "passed": False, "score": 1.0, "details": "matched all, count wrong",
+         "final_text": "bad answer"},
+    ]}
+    row = console.collapse_attempts(record)[0]
+    assert row["passed"] is False
+    assert row["worst"]["details"] == "matched all, count wrong"

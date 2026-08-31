@@ -46,6 +46,7 @@ import io
 import json
 import os
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -67,7 +68,7 @@ from .governance.gate import (
     reconcile,
     reject_approved,
 )
-from .governance.ledger import Ledger, LedgerEntry
+from .governance.ledger import UNREADABLE, Ledger, LedgerEntry
 from .tools import mail, workspace
 
 #: The one console-caused session id. Every ledger row this app writes carries
@@ -80,10 +81,9 @@ SOURCE = "approval-console"
 #: `tools/mail.py` is where the recipient policy lives, not this file.
 _TOOL_FNS: dict[str, Callable[..., dict]] = {**workspace.TOOL_FNS, **mail.TOOL_FNS}
 
-#: A ledger line that will not parse becomes one of these rather than being
-#: skipped. A skipped line in an append-only ledger is precisely the thing this
-#: project promises never happens.
-UNREADABLE = "unreadable"
+#: `UNREADABLE` is the ledger's own constant now: a line that will not read
+#: back degrades inside `Ledger.read`, so the console, the CLI and the gate all
+#: see the same row instead of three different failures.
 
 _READABLE_SUFFIXES = frozenset({".md", ".csv", ".txt"})
 
@@ -162,25 +162,13 @@ def _who(request: Request) -> str:
 # not a traceback.
 
 def load_ledger() -> list[LedgerEntry]:
-    """Every line of the append-only ledger, in file order, tolerantly."""
-    try:
-        text = _ledger_path().read_text(encoding="utf-8")
-    except OSError:
-        return []
-    rows: list[LedgerEntry] = []
-    for n, line in enumerate(text.splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            rows.append(LedgerEntry(**json.loads(line)))
-        except (ValueError, TypeError):
-            rows.append(LedgerEntry(
-                entry_id=f"line-{n}", ts="", session_id="(unreadable)", agent="",
-                tool="", risk="unknown", verdict="unknown", outcome=UNREADABLE,
-                args_digest={"line": n, "raw": line[:2000]},
-                detail="this line could not be parsed as JSON",
-            ))
-    return rows
+    """Every line of the append-only ledger, in file order, tolerantly.
+
+    Thin by design: the tolerance lives in `Ledger.read`, so one bad byte reads
+    as the same UNREADABLE row here, in the CLI, and in the gate's resolution
+    scans — never a 500 on one surface and a rendered row on another.
+    """
+    return list(Ledger(_ledger_path()).read())
 
 
 def load_pending() -> dict[str, dict[str, Any]]:
@@ -231,10 +219,12 @@ def load_runs() -> list[dict[str, Any]]:
 
 
 def best_run(runs: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
-    """The newest run with at least six results — the MOST COMPLETE run, not the
-    newest file. A two-task hero-tier re-run is newer and says almost nothing."""
+    """The newest run with at least six TASKS — the MOST COMPLETE run, not the
+    newest file. Counted in tasks, not result rows: `--tier hero --repeat 3`
+    writes six rows for two tasks, which is exactly the near-empty re-run this
+    threshold exists to keep off the headline."""
     for record in runs if runs is not None else load_runs():
-        if len(record.get("results") or []) >= 6:
+        if len(collapse_attempts(record)) >= 6:
             return record
     return None
 
@@ -880,6 +870,13 @@ _STATES: dict[str, State] = {
     "blocked": State("BLOCKED", "■", "rail-solid", "blocked", "tint-blocked", True),
     UNREADABLE: State("UNREADABLE LINE", "▨", "rail-striped", "blocked", "tint-blocked"),
 }
+
+#: The console and the writers (CLI, sweep) deploy separately, and the outcome
+#: vocabulary has grown before ("abandoned", "executed"). A row this console
+#: does not recognise renders as visibly unrecognised — the old fallback was
+#: the auto_ran state, which asserted RAN on the audit page about an action
+#: nothing here understands.
+_UNKNOWN_STATE = State("UNRECOGNISED", "?", "rail-striped", "blocked", "tint-blocked")
 
 
 def _pill(state: State, extra: str = "") -> str:
@@ -2063,12 +2060,15 @@ def _ledger_row(entry: LedgerEntry, entries: list[LedgerEntry], pending: dict[st
         return (
             f'<div class="lrow {state.rail} {state.tint}" id="e-{esc(entry.entry_id)}" '
             f'style="color:var(--{state.tone})"><div class="rowtop">{_pill(state)}'
-            f'<span class="meta">line {esc(line)}</span></div>'
+            # Three kinds of damage read differently (bad bytes, bad JSON, a
+            # mistyped field), so the row says which, not just that.
+            f'<span class="meta">line {esc(line)} · {esc(entry.detail)}</span></div>'
             f'<pre class="mono" style="white-space:pre-wrap;color:var(--ink)">{esc(raw)}</pre>'
             '<div class="meta">Never silently skipped — a skipped line in an append-only ledger '
             "is exactly the thing this project promises never happens.</div></div>"
         )
-    state = _STATES.get(entry.outcome, _STATES["auto_ran"])
+    known = entry.outcome in _STATES
+    state = _STATES[entry.outcome] if known else _UNKNOWN_STATE
     tint = state.tint
     if entry.outcome == "held":
         status, _ = hold_status(entry, entries, pending)
@@ -2077,7 +2077,9 @@ def _ledger_row(entry: LedgerEntry, entries: list[LedgerEntry], pending: dict[st
         tint = state.tint
         extra = {"awaiting": "AWAITING YOU", "resolved": "RESOLVED", "lapsed": "LAPSED"}[status]
     else:
-        extra = ""
+        # The foreign word itself rides next to the pill, so the row still says
+        # what the writer recorded even though this console cannot rank it.
+        extra = "" if known else entry.outcome
     path = str((entry.args_digest or {}).get("path", (entry.args_digest or {}).get("prefix", "")))
     stranded_note = ""
     if extra == "LAPSED":
@@ -2151,11 +2153,18 @@ def _band_rows(rows: list[LedgerEntry], entries: list[LedgerEntry],
     return "".join(out)
 
 
-def _summary_strip(entries: list[LedgerEntry], pending: dict[str, Any]) -> str:
+#: The outcome vocabulary this console knows, in rendering order. Anything a
+#: newer writer records lands in its own cell AFTER these, so the cells always
+#: sum to the decisions count — the strip's numbers not adding up would be a
+#: false sentence on the screen whose thesis is that miscounts destroy trust.
+_KNOWN_OUTCOMES = ("auto_ran", "held", "approved", "executed",
+                   "rejected", "blocked", "abandoned")
+
+
+def _summary_strip(entries: list[LedgerEntry], pending: dict[str, Any], sha: str) -> str:
     real = [e for e in entries if e.outcome != UNREADABLE]
     unreadable = len(entries) - len(real)
-    counts = {k: sum(1 for e in real if e.outcome == k)
-              for k in ("auto_ran", "held", "approved", "executed", "rejected", "blocked")}
+    counts = Counter(e.outcome for e in real)
     holds = [e for e in real if e.outcome == "held"]
     tally = {"awaiting": 0, "resolved": 0, "lapsed": 0}
     for h in holds:
@@ -2165,17 +2174,32 @@ def _summary_strip(entries: list[LedgerEntry], pending: dict[str, Any]) -> str:
         return (f'<div class="num"><div class="count3">{n}</div>'
                 f'<div class="label" style="color:var(--ink-3)">{esc(label)}</div></div>')
 
-    numbers = "".join([
-        cell(len(real), "decisions"), cell(counts["auto_ran"], "ran"), cell(counts["held"], "held"),
-        cell(counts["approved"], "approved"), cell(counts["executed"], "executed"),
-        cell(counts["rejected"], "rejected"), cell(counts["blocked"], "blocked"),
-    ])
+    numbers = "".join(
+        [cell(len(real), "decisions")]
+        + [cell(counts.get(k, 0), "ran" if k == "auto_ran" else k) for k in _KNOWN_OUTCOMES]
+        + [cell(n, k) for k, n in sorted(counts.items()) if k not in _KNOWN_OUTCOMES]
+    )
     hold_tally = (f"{tally['awaiting']} awaiting you · {tally['resolved']} resolved · "
                   f"{tally['lapsed']} lapsed")
-    sha = ledger_sha256()
     sha_line = (f' · sha256 {esc(sha)}…' if sha else "")
     unread_line = (f'<p style="color:var(--blocked)">{unreadable} line(s) would not parse and are '
                    "rendered below as UNREADABLE LINE.</p>" if unreadable else "")
+
+    # The ask-verdict sentence is counted off the rows' own verdict field, not
+    # off a hardcoded outcome subset: a rejected or abandoned row also carries
+    # `ask`, and the page's rows say so right below this sentence.
+    asks = Counter(e.outcome for e in real if e.verdict == "ask")
+    ask_total = sum(asks.values())
+    parts = ([f"{asks[k]} × {k}" for k in _KNOWN_OUTCOMES if asks.get(k)]
+             + [f"{n} × {esc(k)}" for k, n in sorted(asks.items()) if k not in _KNOWN_OUTCOMES])
+    replayed = (", and an approved row and its executed row are one attempt replayed"
+                if asks.get("approved") or asks.get("executed") else "")
+    ask_line = (
+        f'<p class="lede">The {ask_total} <code>ask</code>-verdict '
+        f'row{"s are" if ask_total != 1 else " is"} not {ask_total} '
+        f'attempt{"s" if ask_total != 1 else ""}: '
+        f'{"they are" if ask_total != 1 else "it is"} {" + ".join(parts)}{replayed}.</p>'
+        if ask_total else "")
     return (
         '<div class="card">'
         f'<div class="hero" style="gap:24px 32px">{numbers}</div>'
@@ -2185,12 +2209,8 @@ def _summary_strip(entries: list[LedgerEntry], pending: dict[str, Any]) -> str:
         '<p class="lede">There is no update path and no delete path in the code. A record that can '
         "be edited is not evidence. The hash is the sha256 of the file as served — a file hash, not "
         "a Merkle chain; recompute it with <code>shasum -a 256</code>.</p>"
-        f'<p class="lede">The {counts["held"] + counts["approved"] + counts["executed"]} '
-        f'<code>ask</code>-verdict rows are not '
-        f'{counts["held"] + counts["approved"] + counts["executed"]} attempts: they are '
-        f'{counts["held"]} holds plus {counts["approved"]} approved plus {counts["executed"]} '
-        "executed, and the last two are one attempt replayed.</p>"
-        f"{unread_line}</div>"
+        + ask_line
+        + f"{unread_line}</div>"
     )
 
 
@@ -2231,14 +2251,17 @@ def record() -> HTMLResponse:
             + _band_rows(rows, entries, pending)
         )
 
+    # Hashed once per request: the printhead and the strip must show the same
+    # hash, and hashing the file twice reads it twice for no extra truth.
+    sha = ledger_sha256()
     body = (
         '<div class="printhead"><strong>Freight Ops Fleet — audit ledger</strong><br>'
-        f'{esc(_ledger_path())} · {len(entries)} lines · sha256 {esc(ledger_sha256())}… · printed '
+        f'{esc(_ledger_path())} · {len(entries)} lines · sha256 {esc(sha)}… · printed '
         f'{datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")}</div>'
         "<h1>The record</h1>"
         '<p class="lede">Every gate decision the fleet made, whichever way it went. '
         f"{_sessions_phrase(len(bands))}, one file, no edit path.</p>"
-        + _summary_strip(entries, pending)
+        + _summary_strip(entries, pending, sha)
         + "".join(bands)
         + '<div class="band">' + derivations_block() + "</div>"
     )
@@ -2248,10 +2271,14 @@ def record() -> HTMLResponse:
 
 @app.get("/ledger.jsonl")
 def ledger_raw() -> PlainTextResponse:
-    """The unedited file. Everything the console renders is derivable from this."""
+    """The unedited file. Everything the console renders is derivable from this.
+
+    Read and served as BYTES: the one line that will not decode as UTF-8 is
+    exactly the line an auditor most needs to see unedited, and it must not be
+    the line that turns the raw view into a 500.
+    """
     try:
-        return PlainTextResponse(_ledger_path().read_text(encoding="utf-8"),
-                                 media_type="text/plain")
+        return PlainTextResponse(_ledger_path().read_bytes(), media_type="text/plain")
     except OSError:
         return PlainTextResponse("", media_type="text/plain")
 
@@ -2330,7 +2357,7 @@ def fleet() -> HTMLResponse:
         "screen. <code>src/freight_fleet/governance/policy.py</code></p></div>"
     )
     return HTMLResponse(_shell("The fleet", body, active="fleet",
-                                pending=len(pending), stranded=stranded_count()))
+                                pending=len(pending), stranded=stranded_count(entries)))
 
 
 # --- screen 5: the Scoreboard ------------------------------------------------
@@ -2368,8 +2395,14 @@ def collapse_attempts(record_: dict[str, Any]) -> list[dict[str, Any]]:
             "n_passed": sum(1 for a in gradable if a.get("passed")),
             "n_gradable": len(gradable),
             # The worst attempt represents the task: the details and the answer
-            # shown are the ones a reader most needs to see.
-            "worst": min(gradable, key=lambda a: float(a.get("score", 0)), default=attempts[0]),
+            # shown are the ones a reader most needs to see. Failed attempts
+            # sort before passing ones whatever their score — the grader can
+            # emit passed=False with a full score (every finding matched, the
+            # reported count did not), and min-by-score alone would put a
+            # passing attempt's answer on a row that says FAIL.
+            "worst": min(gradable,
+                         key=lambda a: (a.get("passed") is True, float(a.get("score", 0))),
+                         default=attempts[0]),
         }
         if gradable:
             row["passed"] = all(a.get("passed") for a in gradable)
@@ -2393,6 +2426,7 @@ def evidence() -> HTMLResponse:
     """Why should the operator trust the five things on their desk? Because the
     answer keys were written before the agents existed, and no model sits in the
     grading path."""
+    entries = load_ledger()
     pending = load_pending()
     runs = load_runs()
     chosen = best_run(runs)
@@ -2408,15 +2442,27 @@ def evidence() -> HTMLResponse:
             "differently in the demo than in the deploy.</p></div>"
         )
         return HTMLResponse(_shell("The scoreboard", body, active="evidence",
-                                   pending=len(pending), stranded=stranded_count()))
+                                   pending=len(pending), stranded=stranded_count(entries)))
 
     passed, gradable = _run_score(chosen)
     task_rows = collapse_attempts(chosen)
-    attempts = max((r["attempts"] for r in task_rows), default=1)
+    attempt_counts = [r["attempts"] for r in task_rows] or [1]
+    attempts = max(attempt_counts)
+    uniform = min(attempt_counts) == attempts
     clean = next((r for r in task_rows if r["id"] == "g2_clean_control"), None)
 
     clean_block = ""
-    if clean is not None:
+    if clean is not None and "passed" not in clean:
+        # The same guard the table has: a row with no gradable attempt is
+        # eye-reviewed, and the centrepiece card must not read FAIL over it.
+        clean_block = (
+            '<div class="card" style="border:3px double var(--line);margin:24px 0">'
+            '<div class="label" style="color:var(--ink-3)">The number to look at first</div>'
+            '<p style="margin-top:12px"><span class="mono">g2_clean_control</span> — '
+            "not mechanically graded in this record; its row below shows what the "
+            "record holds.</p></div>"
+        )
+    elif clean is not None:
         verdict = "PASS" if clean.get("passed") else "FAIL"
         # Named here rather than inlined: this card is the writeup's centrepiece
         # claim, and a reader must be able to see how many attempts stand behind
@@ -2461,7 +2507,10 @@ def evidence() -> HTMLResponse:
         rows.append(f'<tr><td class="mono">{esc(rid)}</td><td>{mark}</td>'
                     f'<td class="mono">{score}</td><td>{note}{detail}</td></tr>')
 
-    history = [r for r in reversed(runs) if len(r.get("results") or []) >= 6]
+    # Same task-counted bar as the headline: a hero-tier repeat record has six
+    # result rows and two tasks, and "7/7 → 2/2" rendered as comparable is the
+    # cherry-pick the collapse exists to block.
+    history = [r for r in reversed(runs) if len(collapse_attempts(r)) >= 6]
     bars = " → ".join(f'<span class="mono">{p}/{g}</span>'
                       for p, g in (_run_score(r) for r in history))
 
@@ -2476,10 +2525,15 @@ def evidence() -> HTMLResponse:
         '<p class="lede">The answer keys were written before the agents existed. No model sits in '
         "the grading path. The run shown is the newest with at least six results — not the newest "
         "file, which may be a two-task hero-tier re-run.</p>"
-        + (f'<p class="lede">Every task was run <span class="mono">{attempts}</span> times. A task '
-           "counts as passed here only if <em>every</em> attempt passed — the fraction is tasks, "
-           "not attempts, so it means the same thing it did before the runs were repeated. The "
-           "per-attempt tally is on each row below.</p>" if attempts > 1 else "")
+        # "Every task was run N times" is only claimed when it is true. run_eval
+        # persists after each attempt so an interrupted --repeat is still
+        # evidence — such a record says "up to N" instead.
+        + ((f'<p class="lede">{"Every task was run" if uniform else "Tasks were run up to"} '
+            f'<span class="mono">{attempts}</span> times'
+            f'{"" if uniform else " — an interrupted repeat keeps every attempt it finished"}. '
+            "A task counts as passed here only if <em>every</em> attempt passed — the fraction "
+            "is tasks, not attempts, so it means the same thing it did before the runs were "
+            "repeated. The per-attempt tally is on each row below.</p>") if attempts > 1 else "")
         + "</div>"
         + clean_block
         + '<div class="band"><h2>Every task in the run</h2><div class="scroll"><table><thead><tr>'
@@ -2491,7 +2545,7 @@ def evidence() -> HTMLResponse:
         "</div>"
     )
     return HTMLResponse(_shell("The scoreboard", body, active="evidence",
-                                pending=len(pending), stranded=stranded_count()))
+                                pending=len(pending), stranded=stranded_count(entries)))
 
 
 # --- screen 6: a source document ---------------------------------------------
