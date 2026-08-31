@@ -114,7 +114,10 @@ class Ledger:
     def append(self, entry: LedgerEntry) -> LedgerEntry:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as fh:
+            # newline="\n" pinned: the console serves and HASHES these exact bytes,
+            # and text mode would write CRLF on Windows - the same run would hash
+            # differently by OS.
+            with self.path.open("a", encoding="utf-8", newline="\n") as fh:
                 fh.write(json.dumps(asdict(entry), ensure_ascii=False) + "\n")
         return entry
 
