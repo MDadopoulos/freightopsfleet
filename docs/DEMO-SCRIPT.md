@@ -10,9 +10,11 @@ away on the same nav.
 
 Rehearse it twice. Record the third take.
 
-**Before you roll:** sign in once as `judge1`, run the sweep (or wait for the
-06:00 one) so the desk has a queue, then sign out. The queue is the first frame;
-it must not be empty. Record at a width where the nav does not wrap.
+**Before you roll:** clear any stale holds (reject them under a judge account
+you won't record with), press **Run the sweep now**, and give it five minutes —
+holds drafted by the current image carry the cited figures the decision page
+verifies, and older ones don't. Then sign out. The queue is the first frame; it
+must not be empty. Record at a width where the nav does not wrap.
 
 ---
 
@@ -73,6 +75,13 @@ it. Read the page top to bottom on camera.
 4. **The documents it read** — the waybill, the packing list, the invoice, each
    one a link. Open one for two seconds so it's clear they're real files, not a
    citation string.
+5. **The cited figures.** The draft quotes its sources — lines of the shape
+   `- "exact text" — document.md` — and the console has already re-read each
+   named file and checked every quote **byte-for-byte**. A verified quote is
+   marked as such; a wrong one is flagged, never repaired. One sentence:
+
+> "The console doesn't take the draft's word for its own quotes. It re-reads
+> the files and checks each one against the bytes."
 
 ## 1:20–1:35 — Approve, and what actually left
 
@@ -109,6 +118,8 @@ Let it stream. While it runs, point at three things as they appear:
   being told which desk;
 - the **Trace** under the answer — every tool call in order, with its arguments
   and what came back;
+- the **Evidence** line closing the answer — the documents it actually read,
+  each a link (and when nothing was read, it says so);
 - the amber **HELD** card at the end.
 
 > "It found the gap, drafted the chaser — and stopped. Nothing was written and
