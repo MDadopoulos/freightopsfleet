@@ -30,6 +30,43 @@
           append-only ledger (JSONL)
 ```
 
+## The deployed shape — one service, one door
+
+```
+                     visitor / judge
+                          │ https
+                          ▼
+        ┌─────────────────────────────────────────┐
+        │  Cloud Run: freight-ops-fleet (1 image) │
+        │                                         │
+        │  access.py — homepage · login (demo     │
+        │  users, or Google OAuth + invite code)  │
+        │  · signed cookie · identity header      │
+        │        │                                │
+        │        ▼                                │
+        │  webapp.py composes:                    │
+        │   ├─ console.py  /desk /ledger /sent    │
+        │   │   /fleet /evidence  (no model code) │
+        │   ├─ chatui.py   /chat  (the one page   │
+        │   │   with JS; trace, evidence, usage)  │
+        │   ├─ /upload  → ingest (Gemini reads    │
+        │   │   the page)                         │
+        │   ├─ /sweep/run → Cloud Run Job trigger │
+        │   └─ ADK api_server  /run_sse /apps/…   │
+        │       coordinator + 5 desks → gate      │
+        └───────┬──────────────┬──────────┬───────┘
+                │              │          │
+                ▼              ▼          ▼
+        GCS /state       Cloud SQL     Vertex AI
+        ledger.jsonl     sessions      Gemini
+        approvals.json   (per          (ADC, no
+        sent/ uploads/   identity)     API keys)
+                ▲
+                │ seeds from state, publishes at end
+        Cloud Run Job: freight-ops-sweep
+        (Cloud Scheduler weekdays 06:00, or the desk button)
+```
+
 ## The one idea
 
 **There is exactly one policy seam, and agents carry no policy.**
@@ -63,8 +100,9 @@ running one, and it is recorded with the approval id that authorized it.
 
 A record that can be edited is not evidence. There is no update path and no
 delete path — the ledger is opened in append mode and read back whole. For the
-demo that is JSONL on disk; the `LedgerEntry` shape is storage-agnostic, so the
-cloud version is a new `Ledger` subclass rather than a schema change.
+demo that is JSONL — on disk locally, on a GCS bucket mounted into the one
+Cloud Run service in the deployment — and the console serves and verifies the
+exact bytes.
 
 ## Why AgentTool rather than sub-agent transfer
 
@@ -81,8 +119,10 @@ Transfer would strand the operator inside whichever specialist answered first.
 - **No multi-tenancy.** One operator, one workspace. The prior system this borrows
   from carries row-level security across tenants; that is the right answer for a
   product and the wrong answer for a 12-day build.
-- **No send path.** `send_email` is risk-classified and unwired. The fleet drafts;
-  the operator sends from their own mail.
+- **No send path the model controls.** `send_email` is wired, CRITICAL and
+  external, so the gate holds it on every path; its body delivers only to the
+  operator's demo mailbox and the approving human — never to the address the
+  model drafted (`tools/mail.py`).
 - **No model in the grading path.** See `eval/grader.py`.
 - **No policy configuration UI.** The catalog is code-owned on purpose: a
   reviewable diff is a better audit surface than a settings screen.

@@ -1978,7 +1978,7 @@ def privacy() -> HTMLResponse:
     resumed. Nothing here is a model call or a file write; it is one more page
     the console renders from constants.
     """
-    contact = os.environ.get("FREIGHT_CONTACT_EMAIL", "mdadopoulos@gmail.com")
+    contact = os.environ.get("FREIGHT_CONTACT_EMAIL", "freightops.demo@gmail.com")
     body = (
         "<h1>Privacy</h1>"
         '<p class="lede">Freight Ops Fleet is a demonstration of a governed fleet of freight '
