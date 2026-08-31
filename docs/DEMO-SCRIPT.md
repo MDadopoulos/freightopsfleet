@@ -10,7 +10,10 @@ away on the same nav.
 
 Rehearse it twice. Record the third take.
 
-**Before you roll:** clear any stale holds (reject them under a judge account
+**Before you roll:** open a second tab on the Cloud Console's **Cloud Run**
+page (the service and the job visible — it is the Google Cloud proof the rules
+require, shown at 2:30) and, if you'll show the inbox beat, a third on the demo
+Gmail. Then clear any stale holds (reject them under a judge account
 you won't record with), press **Run the sweep now**, and give it five minutes —
 holds drafted by the current image carry the cited figures the decision page
 verifies, and older ones don't. Then sign out. The queue is the first frame; it
@@ -152,8 +155,20 @@ Back on the desk, press **Run the sweep now**.
 > "Same unattended job Cloud Scheduler runs every weekday morning — a judge can
 > just start it. A few minutes later its holds appear right here."
 
-(It won't finish inside the video, and it shouldn't: say what it is and move on.
-A second press inside ten minutes is refused, by design.)
+**Then the Google Cloud proof — required by the rules, ~10 s.** Switch to a
+tab you opened before rolling: the Cloud Console's **Cloud Run** page, project
+`gen-lang-client-0176688620`, showing the `freight-ops-fleet` service and the
+`freight-ops-sweep` job — click into the job's **Executions** tab, where the
+run you just started is sitting at the top, spinning, next to this morning's
+scheduled one. One sentence:
+
+> "Same project in the Cloud Console: the service, and the job — with the
+> execution I just started running right now."
+
+Cut back to the desk. (The sweep won't finish inside the video, and it
+shouldn't: a second press inside ten minutes is refused, by design. If you
+triggered a sweep while rehearsing, press it anyway and show the refusal —
+that's the cooldown working — and let the Executions tab carry the proof.)
 
 ## 2:40–2:55 — The record, and close
 
