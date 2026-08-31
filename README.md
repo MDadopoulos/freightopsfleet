@@ -263,6 +263,15 @@ never mistaken for a finding. When a notice cites its sources
 already marked — a mechanical string match, never the model's own claim; a
 quote the file does not carry is flagged on the decision, not highlighted.
 
+**If you see a red "citations the console could not find verbatim" block, that
+is the verifier working, not breaking.** The match is deliberately exact — no
+normalising, no fuzzy rescue — because a quote that needs interpreting cannot
+be verified mechanically. So a paraphrase, a re-typed figure, or a quote where
+the model escaped the file's own quotation marks (`\"11,520\"` for the CSV's
+`"11,520"`) fails closed and is handed to the human with the instruction to
+check by eye. A verifier that found a way to say "verified" every time would
+prove nothing; this one refuses to vouch for what it cannot match, out loud.
+
 Ask about a *named* shipment or folder, as the table does. A question that would
 need every shipment cross-checked ("which one has the most discrepancies?") is
 one the coordinator declines rather than guesses at.
