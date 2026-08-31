@@ -1,5 +1,7 @@
 # Architecture
 
+![Freight Ops Fleet architecture](architecture.png)
+
 ## The shape
 
 ```
