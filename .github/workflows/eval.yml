@@ -24,11 +24,11 @@ on:
         description: "Attempts per task — one run of a stochastic model is an anecdote"
         type: string
         default: "1"
-  schedule:
-    # 05:30 UTC on weekdays. Comment this block out if the spend is not wanted
-    # between demos — docs/DEPLOY.md §11 says how, and says to put it back.
-    - cron: "30 5 * * 1-5"
-      timezone: Europe/Athens
+  # The weekday schedule is off: judging has closed, and a scheduled eval
+  # bills Vertex for a repository nobody is grading. Uncomment to restore.
+  # schedule:
+  #   - cron: "30 5 * * 1-5"
+  #     timezone: Europe/Athens
 
 permissions:
   contents: read
